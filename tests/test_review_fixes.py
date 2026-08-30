@@ -58,7 +58,7 @@ def test_cli_model_override_kwargs_maps_to_provider_override():
 
 
 def test_heavy_temperature_reaches_compile(config, db):
-    from synto.models import RawNoteRecord, SingleArticle
+    from synto.models import RawNoteRecord
     from synto.pipeline import compile as compile_mod
 
     (config.vault / "raw").mkdir(exist_ok=True)
@@ -70,15 +70,15 @@ def test_heavy_temperature_reaches_compile(config, db):
 
     captured: list[float | None] = []
 
-    def fake_request_structured(*args, **kwargs):
+    def fake_request_text(*args, **kwargs):
         captured.append(kwargs.get("temperature"))
-        return SingleArticle(title="Topic", content="Body.", tags=[], summary="s")
+        return "Body."
 
-    with patch.object(compile_mod, "request_structured", side_effect=fake_request_structured):
+    with patch.object(compile_mod, "request_text", side_effect=fake_request_text):
         compile_mod.compile_concepts(config=config, router=as_router(MagicMock(), config), db=db)
 
     assert captured, "compile made no LLM call"
-    assert 0.33 in captured, f"heavy temperature 0.33 never reached request_structured: {captured}"
+    assert 0.33 in captured, f"heavy temperature 0.33 never reached request_text: {captured}"
 
 
 # ── #5: Azure api_version survives the multi-provider vault path ──────────────

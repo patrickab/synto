@@ -5,14 +5,11 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock
 
-from synto.models import SingleArticle
+from synto.models import PageSelection
 from synto.ollama_client import OllamaClient
 from synto.structured_output import (
-    _extract_json,
-    _fix_json_ctrl_escapes,
     _render_example,
     _try_parse,
-    _unwrap,
     request_structured,
 )
 
@@ -23,97 +20,12 @@ def _client(response: str) -> OllamaClient:
     return c
 
 
-# ── _extract_json ─────────────────────────────────────────────────────────────
-
-
-def test_extract_json_bare_code_block():
-    """Bare ``` block without 'json' language tag."""
-    text = 'Here it is:\n```\n{"key": "value"}\n```\nDone.'
-    result = _extract_json(text)
-    assert result == '{"key": "value"}'
-
-
-def test_extract_json_no_json_found():
-    """No JSON anywhere in text → None."""
-    text = "This is just plain text with no JSON."
-    assert _extract_json(text) is None
-
-
-# ── _unwrap ───────────────────────────────────────────────────────────────────
-
-
-def test_unwrap_single_key_dict():
-    """Single-key dict wrapper is unwrapped."""
-    data = {
-        "AnalysisResult": {
-            "summary": "s",
-            "concepts": [],
-            "suggested_topics": [],
-            "quality": "high",
-        }
-    }
-    result = _unwrap(data)
-    assert "summary" in result
-
-
-def test_unwrap_string_encoded_json():
-    """Single-key with JSON string value is parsed."""
-    data = {"result": '{"title": "T", "content": "body", "tags": []}'}
-    result = _unwrap(data)
-    assert result["title"] == "T"
-
-
-def test_unwrap_string_encoded_json_invalid():
-    """Single-key with invalid JSON string → returns original data."""
-    data = {"result": "not json"}
-    result = _unwrap(data)
-    assert result == data
-
-
-def test_unwrap_json_schema_echo():
-    """JSON Schema echo with properties dict is unwrapped."""
-    data = {
-        "description": "A thing",
-        "properties": {"title": "T", "content": "body", "tags": []},
-    }
-    result = _unwrap(data)
-    assert result["title"] == "T"
-
-
-def test_unwrap_json_schema_echo_with_nested_schema():
-    """Properties with nested schema dicts are not unwrapped."""
-    data = {
-        "description": "A thing",
-        "properties": {"title": {"type": "string"}},
-    }
-    result = _unwrap(data)
-    # Not unwrapped because value is a schema dict with "type"
-    assert result == data
-
-
-# ── _fix_json_ctrl_escapes ───────────────────────────────────────────────────
-
-
-def test_fix_ctrl_escapes_nested_dict():
-    """Control chars in nested dict values are fixed."""
-    data = {"content": "test\text"}
-    result = _fix_json_ctrl_escapes(data)
-    assert result["content"] == "test\\text"
-
-
-def test_fix_ctrl_escapes_nested_list():
-    """Control chars in nested list items are fixed."""
-    data = ["item\twith\ttab"]
-    result = _fix_json_ctrl_escapes(data)
-    assert result == ["item\\twith\\ttab"]
-
-
 # ── _try_parse ───────────────────────────────────────────────────────────────
 
 
 def test_try_parse_invalid_json_returns_error():
     """Invalid JSON returns (None, error_string)."""
-    result, error = _try_parse("not json", SingleArticle)
+    result, error = _try_parse("not json", PageSelection)
     assert result is None
     assert error
 
@@ -121,7 +33,19 @@ def test_try_parse_invalid_json_returns_error():
 def test_try_parse_valid_json_wrong_schema():
     """Valid JSON but wrong schema returns (None, error_string)."""
     raw = json.dumps({"wrong": "schema"})
-    result, error = _try_parse(raw, SingleArticle)
+    result, error = _try_parse(raw, PageSelection)
+    assert result is None
+    assert error
+
+
+def test_try_parse_does_not_unwrap_containers():
+    """A {"ClassName": {...}} wrapper is a failure, not something to guess around.
+
+    Unwrapping was a small-model accommodation; the schema is now sent to the
+    provider, so a wrapped response means the request went wrong and should retry.
+    """
+    raw = json.dumps({"PageSelection": {"pages": ["A"]}})
+    result, error = _try_parse(raw, PageSelection)
     assert result is None
     assert error
 
@@ -160,19 +84,19 @@ def test_retry_includes_error_feedback():
         captured_prompts.append(kwargs.get("prompt", ""))
         if call_count == 1:
             return "bad json"
-        return json.dumps({"title": "T", "content": "body", "tags": []})
+        return json.dumps({"pages": ["A"]})
 
     c = MagicMock(spec=OllamaClient)
     c.generate.side_effect = side_effect
 
     result = request_structured(
         client=c,
-        prompt="write article",
-        model_class=SingleArticle,
+        prompt="select pages",
+        model_class=PageSelection,
         model="test",
         max_retries=1,
     )
-    assert result.title == "T"
+    assert result.pages == ["A"]
     assert call_count == 2
     # Second prompt should mention the error
     assert "error" in captured_prompts[1].lower() or "invalid" in captured_prompts[1].lower()

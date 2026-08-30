@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -70,7 +71,7 @@ def test_run_query_returns_answer(vault, config, db):
     _write_concept_page(config, "Quantum Computing", "Qubits exploit superposition.")
 
     selection_json = json.dumps({"pages": ["Quantum Computing"]})
-    answer_json = json.dumps({"answer": "[[Quantum Computing]] uses qubits."})
+    answer_json = "[[Quantum Computing]] uses qubits."
     client = _make_client(selection_json, answer_json)
 
     result = run_query(config, client, db, "What is quantum computing?")
@@ -94,7 +95,7 @@ def test_run_query_missing_page_skipped(vault, config, db):
     # No actual page file created
 
     selection_json = json.dumps({"pages": ["Nonexistent Page"]})
-    answer_json = json.dumps({"answer": "General answer."})
+    answer_json = "General answer."
     client = _make_client(selection_json, answer_json)
 
     result = run_query(config, client, db, "question?")
@@ -107,7 +108,7 @@ def test_run_query_save_creates_file(vault, config, db):
     _write_concept_page(config, "Topic")
 
     selection_json = json.dumps({"pages": ["Topic"]})
-    answer_json = json.dumps({"answer": "Answer about Topic."})
+    answer_json = "Answer about Topic."
     client = _make_client(selection_json, answer_json)
 
     run_query(config, client, db, "Tell me about Topic", save=True)
@@ -122,9 +123,7 @@ def test_run_query_strips_unknown_wikilinks_from_saved_answer(vault, config, db)
     _write_concept_page(config, "Topic")
 
     selection_json = json.dumps({"pages": ["Topic"]})
-    answer_json = json.dumps(
-        {"answer": "Use [[Topic]] but not [[Ghost Topic]] in the saved answer."}
-    )
+    answer_json = "Use [[Topic]] but not [[Ghost Topic]] in the saved answer."
     client = _make_client(selection_json, answer_json)
 
     result = run_query(config, client, db, "Tell me about Topic", save=True)
@@ -141,7 +140,7 @@ def test_run_query_sanitizes_obsidian_math_in_answer(vault, config, db):
     _write_concept_page(config, "Topic")
 
     selection_json = json.dumps({"pages": ["Topic"]})
-    answer_json = json.dumps({"answer": "Equation:\n\\\\[\na=b\n\\\\]"})
+    answer_json = "Equation:\n\\\\[\na=b\n\\\\]"
     client = _make_client(selection_json, answer_json)
 
     result = run_query(config, client, db, "Tell me about Topic")
@@ -149,21 +148,27 @@ def test_run_query_sanitizes_obsidian_math_in_answer(vault, config, db):
     assert result.answer == "Equation:\n$$\na=b\n$$"
 
 
-def test_run_query_save_decodes_literal_newlines_in_answer(vault, config, db):
+def test_run_query_save_keeps_latex_commands_that_start_with_n(vault, config, db):
+    r"""Regression guard: a saved answer keeps every LaTeX command intact.
+
+    The answer used to arrive inside a JSON string and get post-repaired by
+    replacing every literal "\n" with a newline — which shredded \nabla and \nu
+    into a line break plus a stranded "abla"/"u". Plain text has nothing to repair.
+    """
     _write_index(config, "# Wiki Index\n\n## Concepts\n- [[Topic]]\n")
     _write_concept_page(config, "Topic")
 
-    selection_json = json.dumps({"pages": ["Topic"]})
-    answer_json = json.dumps({"answer": "Line 1\\n\\n### Heading\\nUse [[Topic]] here."})
-    client = _make_client(selection_json, answer_json)
+    answer = "## Flow\n\n$$\\nabla p + \\nu \\Delta u = f$$\n\nSee [[Topic]]."
+    client = _make_client(json.dumps({"pages": ["Topic"]}), answer)
 
     result = run_query(config, client, db, "Tell me about Topic", save=True)
 
-    assert "\\n" not in result.answer
-    assert "### Heading" in result.answer
+    assert result.answer.count("\\nabla") == 1
+    assert "\\nu" in result.answer
+    assert "### Heading" not in result.answer
     saved = result.query_save.path.read_text(encoding="utf-8")
-    assert "\\n" not in saved
-    assert "Line 1\n\n### Heading" in saved
+    assert saved.count("\\nabla") == 1
+    assert not re.search(r"^abla", saved, re.MULTILINE)
 
 
 def test_find_page_by_filename(vault, config):
@@ -331,7 +336,7 @@ def test_run_query_passes_index_to_first_call(vault, config, db):
     _write_concept_page(config, "Special Topic")
 
     selection_json = json.dumps({"pages": ["Special Topic"]})
-    answer_json = json.dumps({"answer": "Answer."})
+    answer_json = "Answer."
     client = _make_client(selection_json, answer_json)
 
     run_query(config, client, db, "question?")
@@ -347,7 +352,7 @@ def test_query_answer_prompt_has_language_instruction(vault, config, db):
     _write_concept_page(config, "Topic")
 
     selection_json = json.dumps({"pages": ["Topic"]})
-    answer_json = json.dumps({"answer": "Answer."})
+    answer_json = "Answer."
     client = _make_client(selection_json, answer_json)
 
     run_query(config, client, db, "What is Topic?")
@@ -361,7 +366,7 @@ def test_query_answer_prompt_limits_wikilinks_to_existing_pages(vault, config, d
     _write_concept_page(config, "Scrum", "Product Backlog is mentioned but has no page.")
 
     selection_json = json.dumps({"pages": ["Scrum"]})
-    answer_json = json.dumps({"answer": "Answer."})
+    answer_json = "Answer."
     client = _make_client(selection_json, answer_json)
 
     run_query(config, client, db, "What is Scrum?")

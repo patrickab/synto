@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -9,8 +10,9 @@ import pytest
 from conftest import as_router
 
 from synto.config import Config
-from synto.models import RawNoteRecord, SingleArticle, WikiArticleRecord
+from synto.models import RawNoteRecord, WikiArticleRecord
 from synto.ollama_client import OllamaClient
+from synto.openai_compat_client import LLMBadRequestError
 from synto.pipeline.compile import (
     _apply_draft_media_mode,
     _article_num_predict,
@@ -20,7 +22,6 @@ from synto.pipeline.compile import (
     _inject_body_sections,
     _remove_dangling_open_brackets,
     _repair_bare_bracket_links,
-    _repair_literal_newlines,
     _repair_malformed_embeds,
     _repair_malformed_wikilinks,
     _repair_wikilink_placeholders,
@@ -107,13 +108,13 @@ def test_article_num_predict_concept_compile_applies_soft_output_cap(config, db,
 
     captured: dict[str, int] = {}
 
-    def fake_request_structured(**kwargs):
+    def fake_request_text(**kwargs):
         captured["num_predict"] = kwargs["num_predict"]
-        return SingleArticle(title="Heavy Concept", content="Body", tags=["heavy-concept"])
+        return "Body"
 
     monkeypatch.setattr(
-        "synto.pipeline.compile.request_structured",
-        fake_request_structured,
+        "synto.pipeline.compile.request_text",
+        fake_request_text,
     )
 
     drafts, failed, _ = compile_concepts(config, make_mock_client(), db, concepts=["Heavy Concept"])
@@ -136,13 +137,13 @@ def test_article_num_predict_concept_compile_can_disable_extra_soft_cap(config, 
 
     captured: dict[str, int] = {}
 
-    def fake_request_structured(**kwargs):
+    def fake_request_text(**kwargs):
         captured["num_predict"] = kwargs["num_predict"]
-        return SingleArticle(title="Heavy Concept", content="Body", tags=["heavy-concept"])
+        return "Body"
 
     monkeypatch.setattr(
-        "synto.pipeline.compile.request_structured",
-        fake_request_structured,
+        "synto.pipeline.compile.request_text",
+        fake_request_text,
     )
 
     drafts, failed, _ = compile_concepts(config, make_mock_client(), db, concepts=["Heavy Concept"])
@@ -368,10 +369,57 @@ def test_repair_bare_bracket_links_leaves_unknown_bracketed_prose_plain():
     assert body == "Known [[API]]. Unknown Agile Development note."
 
 
-def test_repair_literal_newlines_converts_escaped_markdown():
-    body = _repair_literal_newlines("## A\\n\\nBody\\n- item")
+def test_compile_concepts_end_to_end_keeps_latex(config, db):
+    r"""Whole chain: model output -> draft on disk, with every LaTeX command intact.
 
-    assert body == "## A\n\nBody\n- item"
+    This is the failure the vault actually shipped: 37 published articles carried
+    lines starting with a bare "abla" where "$\nabla$" had been.
+    """
+    db.upsert_raw(RawNoteRecord(path="raw/ns.md", content_hash="h", status="ingested"))
+    db.upsert_concepts("raw/ns.md", ["Navier-Stokes Equations"])
+    (config.vault / "raw" / "ns.md").write_text(
+        "---\ntitle: NS\n---\nMomentum balance for an incompressible fluid.",
+        encoding="utf-8",
+    )
+
+    article = (
+        "## Overview\n\n"
+        "The momentum equation is\n\n"
+        "$$\\nabla \\cdot u = 0, \\quad \\partial_t u + (u \\cdot \\nabla) u "
+        "= -\\nabla p + \\nu \\Delta u$$\n\n"
+        "with kinematic viscosity $\\nu$ and vorticity $\\nabla \\times u$."
+    )
+    client = make_mock_client(article)
+
+    drafts, failed, _ = compile_concepts(config, client, db)
+
+    assert failed == []
+    body = drafts[0].read_text(encoding="utf-8")
+    assert body.count("\\nabla") == 4
+    assert body.count("\\nu") == 2
+    assert not re.search(r"^abla", body, re.MULTILINE)
+    assert not re.search(r"^u\b", body, re.MULTILINE)
+
+
+def test_write_draft_keeps_latex_commands_that_start_with_n(config, db):
+    r"""Regression guard: the body reaches disk with every LaTeX command intact.
+
+    The old repair turned every literal "\n" into a newline, which shredded
+    \nabla and \nu into a line break plus a stranded "abla"/"u". Nothing escapes
+    the body any more, so nothing has to un-escape it.
+    """
+    draft = _write_draft(
+        content="## Flow\n\n$$\\nabla p + \\nu \\Delta u = f$$\n\nAlso $\\nabla \\times B$.",
+        config=config,
+        source_paths=[],
+        db=db,
+        canonical_title="Navier-Stokes",
+    )
+
+    body = draft.read_text(encoding="utf-8")
+    assert body.count("\\nabla") == 2
+    assert "\\nu" in body
+    assert not re.search(r"^abla", body, re.MULTILINE)
 
 
 def test_strip_unknown_wikilinks_unwraps_invented_links():
@@ -490,16 +538,10 @@ def test_repair_malformed_wikilinks_strips_quote_and_citation_debris():
 
 
 def test_write_draft_unwraps_nonmaterialized_same_run_concept_link(config, db):
-    result = SingleArticle(
-        title="Knowledge Compounding",
+    draft = _write_draft(
         content=(
             "See [[Karpathy LLM Wiki paradigm]] and [[Qing Claw]] and [[sources/2604.11243v2]]."
         ),
-        tags=["knowledge-compounding"],
-    )
-
-    draft = _write_draft(
-        content_result=result,
         config=config,
         source_paths=[],
         db=db,
@@ -514,14 +556,8 @@ def test_write_draft_unwraps_nonmaterialized_same_run_concept_link(config, db):
 
 
 def test_write_draft_keeps_link_when_target_is_resolvable(config, db):
-    result = SingleArticle(
-        title="Knowledge Compounding",
-        content="See [[Karpathy LLM Wiki paradigm]] and [[Qing Claw]].",
-        tags=["knowledge-compounding"],
-    )
-
     draft = _write_draft(
-        content_result=result,
+        content="See [[Karpathy LLM Wiki paradigm]] and [[Qing Claw]].",
         config=config,
         source_paths=[],
         db=db,
@@ -535,14 +571,8 @@ def test_write_draft_keeps_link_when_target_is_resolvable(config, db):
 
 
 def test_write_draft_unwraps_unknown_padded_wikilink_target(config, db):
-    result = SingleArticle(
-        title="Long-Context Regime",
-        content="Compounding uses [[LLM Wiki ]] for persistence.",
-        tags=["long-context"],
-    )
-
     draft = _write_draft(
-        content_result=result,
+        content="Compounding uses [[LLM Wiki ]] for persistence.",
         config=config,
         source_paths=[],
         db=db,
@@ -925,7 +955,7 @@ def test_compile_concepts_draft_media_reference_mode(config, db):
     assert "Media reference: ./_resources/file.pdf" in body
 
 
-def test_compile_concepts_unwraps_same_batch_concepts_until_materialized(config, db):
+def test_compile_concepts_links_same_batch_concepts_immediately(config, db):
     import json
 
     db.upsert_raw(RawNoteRecord(path="raw/a.md", content_hash="h1", status="ingested"))
@@ -946,8 +976,10 @@ def test_compile_concepts_unwraps_same_batch_concepts_until_materialized(config,
     assert failed == []
     alpha = next(path for path in drafts if path.name == "Alpha.md")
     alpha_body = alpha.read_text()
-    assert "Beta" in alpha_body
-    assert "[[Beta]]" not in alpha_body
+    # Beta is compiled in the same batch, so it's a resolvable target even though its
+    # file doesn't exist on disk yet — the first compile of a fresh vault should still
+    # cross-link its own batch instead of only citing sources.
+    assert "[[Beta]]" in alpha_body
 
 
 def test_compile_concepts_skips_pending_draft(config, db):
@@ -983,7 +1015,6 @@ def test_compile_concepts_skips_pending_draft(config, db):
 
 
 def test_compile_concepts_marks_sources_after_each_success(config, db):
-    import json
 
     db.upsert_raw(RawNoteRecord(path="raw/a.md", content_hash="h1", status="ingested"))
     db.upsert_raw(RawNoteRecord(path="raw/b.md", content_hash="h2", status="ingested"))
@@ -994,10 +1025,10 @@ def test_compile_concepts_marks_sources_after_each_success(config, db):
 
     client = make_mock_client()
     client.generate.side_effect = [
-        json.dumps({"title": "Alpha", "content": "Alpha content.", "tags": []}),
-        "not valid json",
-        "not valid json",
-        "not valid json",
+        "Alpha content.",
+        LLMBadRequestError("provider rejected the request"),
+        LLMBadRequestError("provider rejected the request"),
+        LLMBadRequestError("provider rejected the request"),
     ]
 
     drafts, failed, _ = compile_concepts(config, client, db)
@@ -1009,7 +1040,6 @@ def test_compile_concepts_marks_sources_after_each_success(config, db):
 
 
 def test_compile_concepts_mixed_source_failure_keeps_only_failed_concept_queued(config, db):
-    import json
 
     db.upsert_raw(RawNoteRecord(path="raw/a.md", content_hash="h1", status="ingested"))
     db.upsert_raw(RawNoteRecord(path="raw/b.md", content_hash="h2", status="ingested"))
@@ -1020,10 +1050,10 @@ def test_compile_concepts_mixed_source_failure_keeps_only_failed_concept_queued(
 
     client = make_mock_client()
     client.generate.side_effect = [
-        json.dumps({"title": "Alpha", "content": "Alpha content.", "tags": []}),
-        "not valid json",
-        "not valid json",
-        "not valid json",
+        "Alpha content.",
+        LLMBadRequestError("provider rejected the request"),
+        LLMBadRequestError("provider rejected the request"),
+        LLMBadRequestError("provider rejected the request"),
     ]
 
     drafts, failed, _ = compile_concepts(config, client, db, concepts=["Alpha", "Beta"])
@@ -1216,19 +1246,6 @@ def test_compile_concepts_stub_produces_draft(config, db):
     assert len(drafts) == 1
     assert not db.has_stub("Orphan Topic")
     assert "Orphan" in drafts[0].name or "orphan" in drafts[0].name.lower()
-
-
-def test_compile_concepts_stub_failure_adds_to_failed(config, db):
-    """StructuredOutputError during stub compile → concept added to failed."""
-
-    db.add_stub("Bad Stub")
-    client = make_mock_client("not valid json at all {{{")
-    # structured_output will exhaust retries and raise StructuredOutputError
-    # Mock client to always return garbage
-    client.generate.return_value = "garbage"
-
-    drafts, failed, _ = compile_concepts(config, client, db)
-    assert "Bad Stub" in failed
 
 
 def test_compile_concepts_stub_llm_bad_request_adds_to_failed(config, db):

@@ -91,24 +91,23 @@ def test_effective_max_concepts_unknown_type():
 
 
 def test_effective_max_concepts_none_field():
-    # An override with no value is not a value; resolution falls through to the built-in.
+    # An override with no value is not a value; resolution falls through to the global.
     config = Config(
         vault="/tmp/v",
         pipeline={"source_overrides": {"textbook": {}}},
     )
-    assert config.pipeline.effective_max_concepts("textbook") == 25
+    assert config.pipeline.effective_max_concepts("textbook") == 8
 
 
-def test_builtin_book_defaults_apply_without_config():
-    """Long-form source types are book-appropriate out of the box.
+def test_source_type_alone_never_changes_the_ceiling():
+    """There are no built-in per-type ceilings — only config decides.
 
-    Why it matters: a book ingested as `source_type: textbook` with no override must not
-    be capped at the short-note default of 8 — the whole point of source types.
+    Why it matters: `source_type: textbook` used to silently raise the cap to 25,
+    so a configured 8 did nothing. A source type must not move the number by itself.
     """
     config = Config(vault="/tmp/v")
-    assert config.pipeline.effective_max_concepts("textbook") == 25
-    assert config.pipeline.effective_max_concepts("paper") == 15
-    assert config.pipeline.effective_max_concepts("notes") == 8
+    for source_type in ("textbook", "paper", "lecture", "notes", "anything-else"):
+        assert config.pipeline.effective_max_concepts(source_type) == 8
 
 
 def test_explicit_override_beats_builtin_default():
@@ -125,6 +124,32 @@ def test_raised_global_beats_lower_builtin():
     config = Config(vault="/tmp/v", pipeline={"max_concepts_per_source": 40})
     assert config.pipeline.effective_max_concepts("paper") == 40
     assert config.pipeline.effective_max_concepts("notes") == 40
+
+
+def test_lowered_global_applies_to_every_source_type():
+    """A configured ceiling is a ceiling for every type, book-ish or not.
+
+    Why it matters: a lecture PDF stamped `source_type: textbook` used to ignore
+    `max_concepts_per_source = 8` and take a built-in 25, so the configured limit
+    silently did nothing.
+    """
+    config = Config(vault="/tmp/v", pipeline={"max_concepts_per_source": 8})
+    assert config.pipeline.effective_max_concepts("textbook") == 8
+    assert config.pipeline.effective_max_concepts("paper") == 8
+    assert config.pipeline.effective_max_concepts("notes") == 8
+
+
+def test_per_type_override_still_beats_global_ceiling():
+    # The global is a ceiling for types you did not name; naming one is more specific.
+    config = Config(
+        vault="/tmp/v",
+        pipeline={
+            "max_concepts_per_source": 8,
+            "source_overrides": {"paper": {"max_concepts_per_source": 15}},
+        },
+    )
+    assert config.pipeline.effective_max_concepts("paper") == 15
+    assert config.pipeline.effective_max_concepts("textbook") == 8
 
 
 # ── Stage 3: Integration with ingest_note() ────────────────────────────────

@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 from click.testing import CliRunner
 from conftest import as_router
+from pydantic import ValidationError
 
 from synto.cli import cli
 from synto.config import Config
@@ -238,7 +239,7 @@ def test_build_prompt_does_not_cap_concept_count():
     """The analysis prompt must not impose a concept ceiling.
 
     Why it matters: the only "Max 8" in the prompt belongs to named_references guidance.
-    Concepts are capped downstream by effective_max_concepts (textbook 25, paper 15); a
+    Concepts are capped downstream by effective_max_concepts (max_concepts_per_source); a
     concept limit in the prompt would silently cap long-form single-chunk sources below
     their configured ceiling — the path the #52 fix left untested.
     """
@@ -1773,44 +1774,35 @@ def test_merge_chunk_results_picks_first_detected_language():
     assert merged.language == "de"
 
 
-# ── AnalysisResult.coerce_concepts ────────────────────────────────────────────
+# ── AnalysisResult validation ─────────────────────────────────────────────────
 
 
-def test_analysis_result_coerces_string_concepts():
-    r = AnalysisResult(
-        summary="s",
-        concepts=["Foo", "Bar"],
-        suggested_topics=[],
-        quality="high",
-        language=None,
-    )
-    assert r.concepts == [Concept(name="Foo", aliases=[]), Concept(name="Bar", aliases=[])]
+def test_analysis_result_rejects_bare_string_concepts():
+    """Coercion is gone: the schema is sent to the provider, so a bare string is a bug.
+
+    Silently reshaping a malformed response hides the failure; retrying surfaces it.
+    """
+    with pytest.raises(ValidationError):
+        AnalysisResult(
+            summary="s",
+            concepts=["Foo", "Bar"],
+            suggested_topics=[],
+            quality="high",
+            language=None,
+        )
 
 
-def test_analysis_result_accepts_null_summary():
-    r = AnalysisResult(
-        summary=None,
-        concepts=["Example Concept"],
-        named_references=["Example Reference"],
-        suggested_topics=[],
-        quality="low",
-        language=None,
-    )
-
-    assert r.summary == "Source references: Example Concept, Example Reference."
-
-
-def test_analysis_result_accepts_mixed_concepts():
-    r = AnalysisResult(
-        summary="s",
-        concepts=[{"name": "A", "aliases": ["a"]}, "B"],
-        suggested_topics=[],
-        quality="high",
-        language=None,
-    )
-    assert r.concepts[0].aliases == ["a"]
-    assert r.concepts[1].name == "B"
-    assert r.concepts[1].aliases == []
+def test_analysis_result_rejects_null_summary():
+    """A missing summary used to be invented from concept names. Retry instead."""
+    with pytest.raises(ValidationError):
+        AnalysisResult(
+            summary=None,
+            concepts=[Concept(name="Example Concept")],
+            named_references=["Example Reference"],
+            suggested_topics=[],
+            quality="low",
+            language=None,
+        )
 
 
 # ── _dedup_by_shared_alias ────────────────────────────────────────────────────

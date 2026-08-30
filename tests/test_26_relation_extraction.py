@@ -945,9 +945,9 @@ def test_compile_concepts_draft_frontmatter_has_relations_block(
             evidence_text=f"Quantum Entanglement relates to Concept {i}.",
         )
 
-    article_json = (fixtures_dir / "single_article_valid.json").read_text()
+    article_md = (fixtures_dir / "single_article_valid.md").read_text()
     client = MagicMock()
-    client.generate.return_value = article_json
+    client.generate.return_value = article_md
     client = as_router(client)
 
     drafts, failed, _ = compile_concepts(config=config, router=client, db=db)
@@ -979,9 +979,9 @@ def test_compile_concepts_draft_frontmatter_omits_relations_when_none(
     db.upsert_raw(RawNoteRecord(path="raw/note.md", content_hash="abc", status="ingested"))
     db.upsert_concepts("raw/note.md", ["Quantum Entanglement"])
 
-    article_json = (fixtures_dir / "single_article_valid.json").read_text()
+    article_md = (fixtures_dir / "single_article_valid.md").read_text()
     client = MagicMock()
-    client.generate.return_value = article_json
+    client.generate.return_value = article_md
     client = as_router(client)
 
     drafts, failed, _ = compile_concepts(config=config, router=client, db=db)

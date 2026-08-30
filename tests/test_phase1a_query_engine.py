@@ -65,9 +65,7 @@ def test_query_engine_returns_answer_shape_and_selected_pages(config: Config, db
     fast_client = MagicMock()
     heavy_client = MagicMock()
     fast_client.generate.return_value = json.dumps({"pages": ["Quantum Computing"]})
-    heavy_client.generate.return_value = json.dumps(
-        {"answer": "[[Quantum Computing]] uses qubits.", "title": "Quantum Computing"}
-    )
+    heavy_client.generate.return_value = "[[Quantum Computing]] uses qubits."
 
     engine = QueryEngine(
         VaultReader(config.vault),
@@ -79,7 +77,7 @@ def test_query_engine_returns_answer_shape_and_selected_pages(config: Config, db
     answer = engine.query("What is quantum computing?")
 
     assert answer.text == "[[Quantum Computing]] uses qubits."
-    assert answer.title == "Quantum Computing"
+    assert answer.title == "What Is Quantum Computing"
     assert answer.citations == ()
     assert engine.last_selected_pages == ("Quantum Computing",)
     assert fast_client.generate.call_count == 1
@@ -94,9 +92,7 @@ def test_query_engine_uses_fast_and_heavy_clients_for_distinct_stages(
     fast_client = MagicMock()
     heavy_client = MagicMock()
     fast_client.generate.return_value = json.dumps({"pages": ["Topic"]})
-    heavy_client.generate.return_value = json.dumps(
-        {"answer": "Answer about [[Topic]].", "title": "Topic"}
-    )
+    heavy_client.generate.return_value = "Answer about [[Topic]]."
 
     engine = QueryEngine(
         VaultReader(config.vault),
@@ -116,12 +112,16 @@ def test_query_engine_matches_run_query_output(config: Config, db: StateDB) -> N
     _write_index(config, "# Wiki Index\n\n## Concepts\n- [[Topic]]\n")
     _write_concept_page(config, "Topic", "Topic body.")
     selection_json = json.dumps({"pages": ["Topic"]})
-    answer_json = json.dumps({"answer": "Answer about [[Topic]].", "title": "Topic"})
+    answer_json = "Answer about [[Topic]]."
 
+    # The heavy endpoint only ever makes the answer call, so it must answer on its
+    # first response — there is no parse-failure retry to absorb a wrong one now.
+    heavy_client = MagicMock()
+    heavy_client.generate.return_value = answer_json
     engine = QueryEngine(
         VaultReader(config.vault),
         as_endpoint(_make_client(selection_json, answer_json)),
-        as_endpoint(_make_client(selection_json, answer_json)),
+        as_endpoint(heavy_client),
         config,
         db=db,
     )

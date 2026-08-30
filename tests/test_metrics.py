@@ -20,7 +20,7 @@ from synto.metrics import (
     emit_app_event,
     metrics_sink,
 )
-from synto.models import AnalysisResult, SingleArticle
+from synto.models import AnalysisResult, PageSelection
 from synto.ollama_client import OllamaClient
 from synto.structured_output import StructuredOutputError, request_structured
 
@@ -92,27 +92,6 @@ def test_tier1_success_emits_one_event():
     assert ev.prompt_tokens == 100
     assert ev.completion_tokens == 30
     assert ev.error is None
-
-
-# ── Tier 2: extracted from fenced block ───────────────────────────────────────
-
-
-def test_tier2_extracted_event():
-    wrapped = f"Here you go:\n\n```json\n{_valid_analysis()}\n```\n"
-    c = _mock_client(wrapped, last_stats={"latency_ms": 50})
-
-    with metrics_sink() as events:
-        request_structured(
-            client=c,
-            prompt="p",
-            model_class=AnalysisResult,
-            model="gemma4:e4b",
-            stage="ingest",
-        )
-
-    assert len(events) == 1
-    assert events[0].tier == 2
-    assert events[0].retries == 0
 
 
 # ── Tier 3: retry-success ─────────────────────────────────────────────────────
@@ -260,14 +239,14 @@ def test_multiple_calls_accumulate_in_sink():
 
 
 def test_stage_is_passthrough():
-    raw = json.dumps({"title": "T", "content": "body", "tags": ["t"]})
+    raw = json.dumps({"pages": ["A"]})
     c = _mock_client(raw, last_stats={"latency_ms": 3})
 
     with metrics_sink() as events:
         request_structured(
             client=c,
             prompt="w",
-            model_class=SingleArticle,
+            model_class=PageSelection,
             model="qwen2.5:14b",
             stage="query_answer",
             model_role="heavy",

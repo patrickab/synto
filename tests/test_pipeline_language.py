@@ -83,7 +83,7 @@ def test_compile_prompt_config_wins_over_detected(config, db):
 
     prompt = _write_concept_prompt("Topic", "source material", [], language=lang)
     assert "Output language: de" in prompt
-    assert "fr" not in prompt
+    assert "Output language: fr" not in prompt
 
 
 @pytest.mark.integration
@@ -94,7 +94,7 @@ def test_query_answer_prompt_has_language_instruction(vault, config, db):
     (vault / "wiki" / "Topic.md").write_text("---\ntitle: Topic\n---\nContent.")
 
     selection_json = json.dumps({"pages": ["Topic"]})
-    answer_json = json.dumps({"answer": "Réponse."})
+    answer_json = "Réponse."
     client = as_router(MagicMock())
     client.generate.side_effect = [selection_json, answer_json]
 

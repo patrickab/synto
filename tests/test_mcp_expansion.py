@@ -300,7 +300,7 @@ def test_answer_question_does_not_feed_hidden_article_content_to_the_llm(vault, 
         prompts.append(kwargs["prompt"])
         if len(prompts) == 1:
             return json.dumps({"pages": ["Secret Topic"]})
-        return json.dumps({"answer": "a safe answer", "title": "Safe"})
+        return "a safe answer"
 
     client = MagicMock()
     client.generate.side_effect = side_effect
@@ -342,7 +342,7 @@ def test_answer_question_keeps_visible_content_when_a_hidden_page_is_also_select
         prompts.append(kwargs["prompt"])
         if len(prompts) == 1:
             return json.dumps({"pages": ["Public Topic", "Secret Topic"]})
-        return json.dumps({"answer": "a safe answer", "title": "Safe"})
+        return "a safe answer"
 
     client = MagicMock()
     client.generate.side_effect = side_effect
@@ -386,7 +386,7 @@ def test_answer_question_still_includes_source_page_content(vault, db, monkeypat
         prompts.append(kwargs["prompt"])
         if len(prompts) == 1:
             return json.dumps({"pages": ["sources/Source Note"]})
-        return json.dumps({"answer": "a safe answer", "title": "Safe"})
+        return "a safe answer"
 
     client = MagicMock()
     client.generate.side_effect = side_effect

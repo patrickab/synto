@@ -5,7 +5,7 @@ Flow:
   1. Read wiki/index.md (no embeddings — index is the routing layer)
   2. Fast model selects relevant pages (PageSelection)
   3. Load page content (up to MAX_PAGES, MAX_CHARS_PER_PAGE each)
-  4. Heavy model generates answer (QueryAnswer)
+  4. Heavy model generates the answer as plain markdown
   5. Optionally save to wiki/queries/
 """
 
@@ -29,7 +29,7 @@ from ..engines import QueryConfig, QueryEngine
 from ..indexer import append_log, generate_index
 from ..markdown_math import sanitize_obsidian_math
 from ..metrics import AppEvent, emit_app_event
-from ..models import PageSelection, QueryAnswer, WikiArticleRecord
+from ..models import PageSelection, WikiArticleRecord
 from ..readers import VaultReader
 from ..sanitize import clean_display_name
 from ..state import (
@@ -38,7 +38,7 @@ from ..state import (
     StateDB,
     SynthesisInsertConflictError,
 )
-from ..structured_output import request_structured
+from ..structured_output import request_structured, request_text
 from ..vault import (
     atomic_write,
     list_wiki_articles,
@@ -307,8 +307,7 @@ def _strip_unknown_wikilinks(content: str, known_titles: list[str]) -> str:
 def _sanitize_query_answer(answer: str, source_pages: list[str], known_titles: list[str]) -> str:
     """Strip invented wikilinks from query answers before returning or saving."""
     allowed_titles = [*known_titles, *source_pages]
-    sanitized = answer.replace("\\r\\n", "\n").replace("\\n", "\n")
-    return _strip_unknown_wikilinks(sanitize_obsidian_math(sanitized), allowed_titles)
+    return _strip_unknown_wikilinks(sanitize_obsidian_math(answer), allowed_titles)
 
 
 def _body_hash(body: str) -> str:
@@ -782,16 +781,13 @@ def _query_core(
         f"this list: {known_titles}. Do not create links for terms missing from that list. "
         "Use Obsidian math syntax: inline $...$ and display $$...$$. Do not use \\[...\\]. "
         "Answer in the same language as the user's question. "
-        "Also provide a short topic title for the answer subject. "
-        'Return JSON: {"answer": "your full markdown answer here", "title": "short title"}'
+        "Reply with the markdown answer only — no JSON, no preamble."
     )
-    result = request_structured(
+    answer = request_text(
         client=heavy_ep.client,
         prompt=answer_prompt,
-        model_class=QueryAnswer,
         model=heavy_ep.model,
         num_ctx=heavy_ep.ctx,
-        max_retries=2,
         stage="query_answer",
         model_role="heavy",
         think=heavy_ep.think,
@@ -799,11 +795,13 @@ def _query_core(
         temperature=heavy_ep.temperature,
     )
 
-    sanitized_answer = _sanitize_query_answer(result.answer, pages, known_title_list)
+    sanitized_answer = _sanitize_query_answer(answer, pages, known_title_list)
     return _QueryCoreResult(
         answer=sanitized_answer,
         selected_pages=pages,
-        title=result.title,
+        # Titles are derived from the question, not asked for alongside the answer:
+        # wanting a second field is what forced this call onto the JSON path.
+        title=_derive_synthesis_title(question, None),
     )
 
 

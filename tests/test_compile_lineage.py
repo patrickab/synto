@@ -100,7 +100,7 @@ def test_finish_compile_run(tmp_path: Path) -> None:
 
 def test_compile_run_recorded(tmp_path: Path, config, db) -> None:
     """A full compile_concepts call must create a compile_runs row."""
-    from synto.models import RawNoteRecord, SingleArticle
+    from synto.models import RawNoteRecord
     from synto.pipeline.compile import compile_concepts
 
     # Set up a note with a concept needing compile
@@ -118,15 +118,10 @@ def test_compile_run_recorded(tmp_path: Path, config, db) -> None:
     )
     db.upsert_concepts(rel, ["TestConcept"])
 
-    mock_result = SingleArticle(
-        title="TestConcept",
-        content="Test content about TestConcept.",
-        tags=["test"],
-        summary="A test article.",
-    )
+    mock_result = "Test content."
 
     client = as_router(MagicMock())
-    with patch("synto.pipeline.compile.request_structured", return_value=mock_result):
+    with patch("synto.pipeline.compile.request_text", return_value=mock_result):
         compile_concepts(config, client, db)
 
     count = db._conn.execute("SELECT COUNT(*) FROM compile_runs").fetchone()[0]
@@ -144,7 +139,7 @@ def test_compile_run_recorded(tmp_path: Path, config, db) -> None:
 
 def test_frontmatter_lineage_key(tmp_path: Path, config, db) -> None:
     """Compiled article frontmatter must contain a 'lineage' key."""
-    from synto.models import RawNoteRecord, SingleArticle
+    from synto.models import RawNoteRecord
     from synto.pipeline.compile import compile_concepts
     from synto.vault import parse_note
 
@@ -155,15 +150,10 @@ def test_frontmatter_lineage_key(tmp_path: Path, config, db) -> None:
     db.upsert_raw(RawNoteRecord(path=rel, content_hash="def456", status="ingested"))
     db.upsert_concepts(rel, ["LineageConcept"])
 
-    mock_result = SingleArticle(
-        title="LineageConcept",
-        content="Content.",
-        tags=["test"],
-        summary="Summary.",
-    )
+    mock_result = "Test content."
 
     client = as_router(MagicMock())
-    with patch("synto.pipeline.compile.request_structured", return_value=mock_result):
+    with patch("synto.pipeline.compile.request_text", return_value=mock_result):
         draft_paths, _, _ = compile_concepts(config, client, db)
 
     assert draft_paths, "At least one draft should be written"
@@ -183,17 +173,14 @@ def test_stub_frontmatter_lineage_key(tmp_path: Path, config, db) -> None:
     Regression: stub drafts were written without run_ulid, so published stubs
     traced to "No lineage recorded" and would be invisible to staleness checks.
     """
-    from synto.models import SingleArticle
     from synto.pipeline.compile import compile_concepts
     from synto.vault import parse_note
 
     db.add_stub("StubConcept")
 
-    mock_result = SingleArticle(
-        title="StubConcept", content="Stub content.", tags=[], summary="Stub."
-    )
+    mock_result = "Test content."
     client = as_router(MagicMock())
-    with patch("synto.pipeline.compile.request_structured", return_value=mock_result):
+    with patch("synto.pipeline.compile.request_text", return_value=mock_result):
         draft_paths, _, _ = compile_concepts(config, client, db)
 
     assert draft_paths, "Stub draft should be written"
@@ -211,7 +198,7 @@ def test_legacy_frontmatter_lineage_key(tmp_path: Path, config, db) -> None:
     Regression: compile_notes had no run identity at all, so legacy-born
     articles traced to "No lineage recorded".
     """
-    from synto.models import ArticlePlan, CompilePlan, RawNoteRecord, SingleArticle
+    from synto.models import ArticlePlan, CompilePlan, RawNoteRecord
     from synto.pipeline.compile import compile_notes
     from synto.vault import parse_note
 
@@ -231,9 +218,11 @@ def test_legacy_frontmatter_lineage_key(tmp_path: Path, config, db) -> None:
             )
         ]
     )
-    article = SingleArticle(title="LegacyArticle", content="Content.", tags=[], summary="S.")
     client = as_router(MagicMock())
-    with patch("synto.pipeline.compile.request_structured", side_effect=[plan, article]):
+    with (
+        patch("synto.pipeline.compile.request_structured", return_value=plan),
+        patch("synto.pipeline.compile.request_text", return_value="Content."),
+    ):
         draft_paths, _ = compile_notes(config, client, db)
 
     assert draft_paths, "Legacy draft should be written"
@@ -259,7 +248,7 @@ def test_trace_article_command(tmp_path: Path, config, db) -> None:
     from click.testing import CliRunner
 
     from synto.cli import cli
-    from synto.models import RawNoteRecord, SingleArticle
+    from synto.models import RawNoteRecord
     from synto.pipeline.compile import compile_concepts
 
     # Compile to produce a draft with lineage
@@ -270,11 +259,9 @@ def test_trace_article_command(tmp_path: Path, config, db) -> None:
     db.upsert_raw(RawNoteRecord(path=rel, content_hash="ghi789", status="ingested"))
     db.upsert_concepts(rel, ["TraceConcept"])
 
-    mock_result = SingleArticle(
-        title="TraceConcept", content="Content.", tags=[], summary="Summary."
-    )
+    mock_result = "Test content."
     client = as_router(MagicMock())
-    with patch("synto.pipeline.compile.request_structured", return_value=mock_result):
+    with patch("synto.pipeline.compile.request_text", return_value=mock_result):
         compile_concepts(config, client, db)
 
     runner = CliRunner()

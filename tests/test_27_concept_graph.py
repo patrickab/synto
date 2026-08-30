@@ -353,7 +353,7 @@ def _make_query_clients(pages: list[str]) -> tuple[MagicMock, MagicMock]:
     fast_client = MagicMock()
     heavy_client = MagicMock()
     fast_client.generate.return_value = json.dumps({"pages": pages})
-    heavy_client.generate.return_value = json.dumps({"answer": "Raft answer.", "title": "Raft"})
+    heavy_client.generate.return_value = "Raft answer."
     return fast_client, heavy_client
 
 

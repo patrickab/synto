@@ -11,12 +11,13 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from synto.models import AnalysisResult, CompilePlan, LintResult, SingleArticle
+from synto.models import AnalysisResult, CompilePlan, LintResult, PageSelection
 from synto.ollama_client import OllamaClient
 from synto.structured_output import (
     StructuredOutputError,
     _make_template,
     request_structured,
+    request_text,
 )
 
 
@@ -58,44 +59,18 @@ def test_valid_compile_plan(fixtures_dir):
     assert result.articles[0].action == "create"
 
 
-def test_valid_single_article(fixtures_dir):
-    raw = (fixtures_dir / "single_article_valid.json").read_text()
-    result = request_structured(
-        client=_client(raw),
-        prompt="write",
-        model_class=SingleArticle,
-        model="qwen2.5:14b",
-    )
-    assert result.title == "Quantum Entanglement"
-    assert "quantum-physics" in result.tags
-    assert "## Overview" in result.content
-
-
-# ── Tier 2: extract from fenced blocks ────────────────────────────────────────
-
-
-def test_fenced_json_extraction(fixtures_dir):
-    inner = (fixtures_dir / "analysis_valid.json").read_text()
-    wrapped = f"Here is the analysis:\n\n```json\n{inner}\n```\n\nDone."
-    result = request_structured(
-        client=_client(wrapped),
-        prompt="analyze",
-        model_class=AnalysisResult,
-        model="gemma4:e4b",
-    )
-    assert result.quality == "high"
-
-
-def test_bare_json_in_prose(fixtures_dir):
+def test_prose_wrapped_json_is_retried_not_salvaged(fixtures_dir):
+    """Extraction heuristics are gone: a model that wraps JSON in prose gets retried."""
     inner = (fixtures_dir / "analysis_valid.json").read_text()
     wrapped = f"Sure, here you go:\n{inner}\nHope that helps!"
-    result = request_structured(
-        client=_client(wrapped),
-        prompt="analyze",
-        model_class=AnalysisResult,
-        model="gemma4:e4b",
-    )
-    assert result.quality == "high"
+    with pytest.raises(StructuredOutputError):
+        request_structured(
+            client=_client(wrapped),
+            prompt="analyze",
+            model_class=AnalysisResult,
+            model="gemma4:e4b",
+            max_retries=0,
+        )
 
 
 # ── Tier 3: retry on failure ───────────────────────────────────────────────────
@@ -152,25 +127,13 @@ def test_schema_validation_failure():
         )
 
 
-def test_single_article_sanitizes_tags():
-    """SingleArticle validator cleans tags at parse time."""
-    article = SingleArticle(title="X", content="Y", tags=["bad tag", "C++", "physics"])
-    assert "bad-tag" in article.tags
-    assert "c" in article.tags
-    assert "physics" in article.tags
-    # Original dirty values gone
-    assert "bad tag" not in article.tags
-    assert "C++" not in article.tags
-
-
 def test_num_predict_passed_to_generate():
     """num_predict forwarded to client.generate so output isn't truncated mid-JSON."""
-    raw = json.dumps({"title": "T", "content": "body", "tags": ["t"]})
-    c = _client(raw)
+    c = _client(json.dumps({"pages": ["A"]}))
     request_structured(
         client=c,
-        prompt="write",
-        model_class=SingleArticle,
+        prompt="select",
+        model_class=PageSelection,
         model="qwen2.5:14b",
         num_ctx=16384,
         num_predict=8192,
@@ -181,12 +144,11 @@ def test_num_predict_passed_to_generate():
 
 def test_num_predict_default_is_minus_one():
     """Default num_predict=-1 means unlimited — Ollama generates until stop token."""
-    raw = json.dumps({"title": "T", "content": "body", "tags": ["t"]})
-    c = _client(raw)
+    c = _client(json.dumps({"pages": ["A"]}))
     request_structured(
         client=c,
-        prompt="write",
-        model_class=SingleArticle,
+        prompt="select",
+        model_class=PageSelection,
         model="qwen2.5:14b",
     )
     _, kwargs = c.generate.call_args
@@ -194,12 +156,11 @@ def test_num_predict_default_is_minus_one():
 
 
 def test_temperature_passed_to_generate():
-    raw = json.dumps({"title": "T", "content": "body", "tags": ["t"]})
-    c = _client(raw)
+    c = _client(json.dumps({"pages": ["A"]}))
     request_structured(
         client=c,
-        prompt="write",
-        model_class=SingleArticle,
+        prompt="select",
+        model_class=PageSelection,
         model="qwen2.5:14b",
         temperature=0,
     )
@@ -207,143 +168,66 @@ def test_temperature_passed_to_generate():
     assert kwargs.get("temperature") == 0
 
 
+def test_json_schema_is_sent_as_format():
+    """Ollama >=0.5 grammar-constrains on a schema; "json" only constrains syntax."""
+    c = _client(json.dumps({"pages": ["A"]}))
+    request_structured(
+        client=c,
+        prompt="select",
+        model_class=PageSelection,
+        model="qwen2.5:14b",
+    )
+    _, kwargs = c.generate.call_args
+    assert kwargs["format"] == PageSelection.model_json_schema()
+    assert "pages" in kwargs["format"]["properties"]
+
+
 def test_truncated_json_fails_all_retries():
     """Truncated JSON (output cut off mid-string) exhausts retries and raises."""
-    truncated = '{"title": "T", "content": "body that got cut off'
-    c = _client(truncated)
+    c = _client('{"pages": ["A')
     with pytest.raises(StructuredOutputError, match="Invalid JSON"):
         request_structured(
             client=c,
-            prompt="write",
-            model_class=SingleArticle,
+            prompt="select",
+            model_class=PageSelection,
             model="qwen2.5:14b",
             max_retries=1,
         )
 
 
-def test_single_article_missing_required_field():
-    # Missing required 'content' field should fail validation
-    bad = json.dumps(
-        {
-            "title": "Test",
-            "tags": [],
-            # content missing
-        }
-    )
-    c = _client(bad)
+def test_missing_required_field_raises():
+    c = _client(json.dumps({"wrong": []}))
     with pytest.raises(StructuredOutputError):
         request_structured(
             client=c,
-            prompt="write",
-            model_class=SingleArticle,
+            prompt="select",
+            model_class=PageSelection,
             model="qwen2.5:14b",
             max_retries=0,
         )
 
 
-def test_invalid_backslash_escape_in_content_is_repaired():
-    raw = r'{"title":"T","content":"Windows path C:\Projects\Vault\File.md","tags":["t"]}'
-    c = _client(raw)
-
-    result = request_structured(
-        client=c,
-        prompt="write",
-        model_class=SingleArticle,
-        model="qwen2.5:14b",
-        max_retries=0,
-    )
-
-    assert result.content == r"Windows path C:\Projects\Vault\File.md"
+# ── request_text: prose never touches the JSON path ───────────────────────────
 
 
-def test_invalid_unicode_style_escape_in_content_is_repaired():
-    raw = '{"title":"T","content":"Equation: \\underbrace{x+y} and \\uparrow","tags":["t"]}'
+def test_request_text_returns_body_verbatim():
+    r"""The whole point: \nabla stays \nabla.
 
-    result = request_structured(
-        client=_client(raw),
-        prompt="write",
-        model_class=SingleArticle,
-        model="qwen2.5:14b",
-        max_retries=0,
-    )
-
-    assert result.content == "Equation: \\underbrace{x+y} and \\uparrow"
-
-
-def test_odd_backslash_run_before_latex_command_is_repaired():
-    raw = (
-        r'{"title":"T","content":"Coverage rate $H_i \\\in [0,1]$ '
-        r'and cost $\\\approx 3.4$K.","tags":["t"]}'
-    )
-
-    result = request_structured(
-        client=_client(raw),
-        prompt="write",
-        model_class=SingleArticle,
-        model="qwen2.5:14b",
-        max_retries=0,
-    )
-
-    assert result.content == r"Coverage rate $H_i \\in [0,1]$ and cost $\\approx 3.4$K."
+    Through JSON this string decodes to a newline plus a stranded "abla" —
+    a *valid* escape, so there is no error to catch and no way to repair it.
+    """
+    body = "## Flow\n\n$$\\nabla p + \\nu \\Delta u = f$$\n\nWith $\\alpha \\in [0,1]$."
+    result = request_text(client=_client(body), prompt="write", model="qwen2.5:14b")
+    assert result == body
+    assert result.count("\\nabla") == 1
+    assert "\nabla" not in result
 
 
-def test_valid_unicode_escape_is_preserved():
-    raw = '{"title":"T","content":"Dash: \\u2014 done.","tags":["t"]}'
-
-    result = request_structured(
-        client=_client(raw),
-        prompt="write",
-        model_class=SingleArticle,
-        model="qwen2.5:14b",
-        max_retries=0,
-    )
-
-    assert result.content in {"Dash: - done.", "Dash: \u2014 done.", "Dash: — done."}
-
-
-def test_latex_backslash_t_commands_are_restored():
-    # LLM emits \text and \times without double-escaping; json.loads converts \t → tab
-    raw = '{"title":"T","content":"C_{\\text{generate},i} and 24\\times","tags":["t"]}'
-    result = request_structured(
-        client=_client(raw),
-        prompt="p",
-        model_class=SingleArticle,
-        model="m",
-        max_retries=0,
-    )
-    assert result.content == "C_{\\text{generate},i} and 24\\times"
-
-
-def test_latex_backslash_b_and_f_commands_are_restored():
-    # \b → backspace (corrupts \beta), \f → form feed (corrupts \frac)
-    raw = '{"title":"T","content":"\\beta + \\frac{1}{2}","tags":["t"]}'
-    result = request_structured(
-        client=_client(raw),
-        prompt="p",
-        model_class=SingleArticle,
-        model="m",
-        max_retries=0,
-    )
-    assert result.content == "\\beta + \\frac{1}{2}"
-
-
-def test_fenced_json_with_odd_backslash_run_parses():
-    wrapped = (
-        "Here is the article:\n\n```json\n"
-        r'{"title":"T","content":"$H_i \\\in [0,1]$ and $\\\approx 3.4$K","tags":["t"]}'
-        "\n```"
-    )
-
-    result = request_structured(
-        client=_client(wrapped),
-        prompt="write",
-        model_class=SingleArticle,
-        model="qwen2.5:14b",
-        max_retries=0,
-    )
-
-    assert result.title == "T"
-    assert r"$H_i \\in [0,1]$" in result.content
+def test_request_text_sends_no_format():
+    c = _client("body")
+    request_text(client=c, prompt="write", model="m")
+    _, kwargs = c.generate.call_args
+    assert kwargs["format"] is None
 
 
 # ── _make_template: nested object rendering ──────────────────────────────────
@@ -363,8 +247,8 @@ def test_template_expands_nested_object_array():
 def test_template_does_not_cap_concept_count():
     """The rendered template must not surface a per-call concept ceiling.
 
-    Why it matters: concepts are capped downstream by effective_max_concepts (textbook 25,
-    paper 15). A number like "max 8" leaking from the schema into the template would tell the
+    Why it matters: concepts are capped downstream by effective_max_concepts, from
+    config. A number like "max 8" leaking from the schema into the template would tell the
     model to stop early and silently cap long-form sources below their configured ceiling —
     exactly the failure mode #52 fixed for multi-chunk sources, here for single-chunk ones.
     """

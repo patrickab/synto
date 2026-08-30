@@ -41,7 +41,7 @@ def db(config):
     return StateDB(config.state_db_path)
 
 
-def _make_client(plan_json: str, article_json: str, config=None):
+def _make_client(plan_json: str, article_md: str, config=None):
     """Mock client: first call returns plan, subsequent return article."""
     client = MagicMock()
     call_count = [0]
@@ -50,7 +50,7 @@ def _make_client(plan_json: str, article_json: str, config=None):
         call_count[0] += 1
         if call_count[0] == 1:
             return plan_json
-        return article_json
+        return article_md
 
     client.generate.side_effect = generate_side_effect
     return as_router(client, config)
@@ -69,8 +69,8 @@ def test_compile_creates_draft(vault, config, db, fixtures_dir):
     )
 
     plan_json = (fixtures_dir / "compile_plan_valid.json").read_text()
-    article_json = (fixtures_dir / "single_article_valid.json").read_text()
-    client = _make_client(plan_json, article_json)
+    article_md = (fixtures_dir / "single_article_valid.md").read_text()
+    client = _make_client(plan_json, article_md)
 
     drafts, failed = compile_notes(config=config, router=client, db=db)
 
@@ -86,8 +86,8 @@ def test_draft_has_correct_frontmatter(vault, config, db, fixtures_dir):
     db.upsert_raw(RawNoteRecord(path="raw/note.md", content_hash="h", status="ingested"))
 
     plan_json = (fixtures_dir / "compile_plan_valid.json").read_text()
-    article_json = (fixtures_dir / "single_article_valid.json").read_text()
-    client = _make_client(plan_json, article_json)
+    article_md = (fixtures_dir / "single_article_valid.md").read_text()
+    client = _make_client(plan_json, article_md)
 
     drafts, _ = compile_notes(config=config, router=client, db=db)
     assert drafts
@@ -107,8 +107,8 @@ def test_dry_run_writes_nothing(vault, config, db, fixtures_dir):
     db.upsert_raw(RawNoteRecord(path="raw/note.md", content_hash="h", status="ingested"))
 
     plan_json = (fixtures_dir / "compile_plan_valid.json").read_text()
-    article_json = (fixtures_dir / "single_article_valid.json").read_text()
-    client = _make_client(plan_json, article_json)
+    article_md = (fixtures_dir / "single_article_valid.md").read_text()
+    client = _make_client(plan_json, article_md)
 
     drafts, _ = compile_notes(config=config, router=client, db=db, dry_run=True)
     assert drafts == []
@@ -127,8 +127,8 @@ def test_legacy_compile_uses_article_max_tokens_from_config(vault, config, db, f
     db.upsert_raw(RawNoteRecord(path="raw/note.md", content_hash="h", status="ingested"))
 
     plan_json = (fixtures_dir / "compile_plan_valid.json").read_text()
-    article_json = (fixtures_dir / "single_article_valid.json").read_text()
-    client = _make_client(plan_json, article_json, config)
+    article_md = (fixtures_dir / "single_article_valid.md").read_text()
+    client = _make_client(plan_json, article_md, config)
 
     compile_notes(config=config, router=client, db=db)
 
@@ -150,8 +150,8 @@ def test_legacy_compile_ignores_concept_draft_soft_cap(vault, config, db, fixtur
     db.upsert_raw(RawNoteRecord(path="raw/note.md", content_hash="h", status="ingested"))
 
     plan_json = (fixtures_dir / "compile_plan_valid.json").read_text()
-    article_json = (fixtures_dir / "single_article_valid.json").read_text()
-    client = _make_client(plan_json, article_json, config)
+    article_md = (fixtures_dir / "single_article_valid.md").read_text()
+    client = _make_client(plan_json, article_md, config)
 
     compile_notes(config=config, router=client, db=db)
 
@@ -212,10 +212,10 @@ def test_reject_deletes_draft(vault, config, db):
 # ── Concept-driven compile tests ───────────────────────────────────────────────
 
 
-def _make_concept_client(article_json: str):
+def _make_concept_client(article_md: str):
     """Mock client that returns a single article for any generate() call."""
     client = MagicMock()
-    client.generate.return_value = article_json
+    client.generate.return_value = article_md
     return as_router(client)
 
 
@@ -229,8 +229,8 @@ def test_compile_concepts_creates_draft(vault, config, db, fixtures_dir):
     )
     db.upsert_concepts("raw/note.md", ["Quantum Entanglement"])
 
-    article_json = (fixtures_dir / "single_article_valid.json").read_text()
-    client = _make_concept_client(article_json)
+    article_md = (fixtures_dir / "single_article_valid.md").read_text()
+    client = _make_concept_client(article_md)
 
     drafts, failed, _ = compile_concepts(config=config, router=client, db=db)
 
@@ -302,8 +302,8 @@ def test_compile_concepts_manual_edit_protection(vault, config, db, fixtures_dir
         )
     )
 
-    article_json = (fixtures_dir / "single_article_valid.json").read_text()
-    client = _make_concept_client(article_json)
+    article_md = (fixtures_dir / "single_article_valid.md").read_text()
+    client = _make_concept_client(article_md)
 
     drafts, failed, _ = compile_concepts(config=config, router=client, db=db)
 
@@ -337,21 +337,21 @@ def test_compile_concepts_force_overrides_edit_protection(vault, config, db, fix
         )
     )
 
-    article_json = (fixtures_dir / "single_article_valid.json").read_text()
-    client = _make_concept_client(article_json)
+    article_md = (fixtures_dir / "single_article_valid.md").read_text()
+    client = _make_concept_client(article_md)
 
     drafts, failed, _ = compile_concepts(config=config, router=client, db=db, force=True)
 
     assert len(drafts) == 1
 
 
-def test_write_concept_prompt_has_tag_instructions():
+def test_write_concept_prompt_asks_for_markdown_body_only():
     prompt = _write_concept_prompt("Quantum Computing", "source text", [])
-    assert "hyphen-separated" in prompt
-    assert "machine-learning" in prompt
+    assert "markdown body only" in prompt
+    assert "JSON" in prompt and "no JSON" in prompt
 
 
-def test_write_prompt_legacy_has_tag_instructions():
+def test_write_prompt_legacy_asks_for_markdown_body_only():
     from synto.models import ArticlePlan
 
     plan = ArticlePlan(
@@ -362,7 +362,7 @@ def test_write_prompt_legacy_has_tag_instructions():
         source_paths=[],
     )
     prompt = _write_prompt_legacy(plan, "source text", [])
-    assert "hyphen-separated" in prompt
+    assert "markdown body only" in prompt
 
 
 def test_compile_concepts_marks_sources_compiled(vault, config, db, fixtures_dir):
@@ -375,8 +375,8 @@ def test_compile_concepts_marks_sources_compiled(vault, config, db, fixtures_dir
     )
     db.upsert_concepts("raw/note.md", ["Concept A"])
 
-    article_json = (fixtures_dir / "single_article_valid.json").read_text()
-    client = _make_concept_client(article_json)
+    article_md = (fixtures_dir / "single_article_valid.md").read_text()
+    client = _make_concept_client(article_md)
 
     compile_concepts(config=config, router=client, db=db)
 
@@ -385,7 +385,7 @@ def test_compile_concepts_marks_sources_compiled(vault, config, db, fixtures_dir
 
 
 def test_compile_concepts_failed_same_source_stays_queued(vault, config, db):
-    import json
+    from synto.openai_compat_client import LLMBadRequestError
 
     db.upsert_raw(RawNoteRecord(path="raw/note.md", content_hash="abc", status="ingested"))
     db.upsert_concepts("raw/note.md", ["Alpha", "Beta"])
@@ -393,10 +393,10 @@ def test_compile_concepts_failed_same_source_stays_queued(vault, config, db):
 
     client = as_router(MagicMock())
     client.generate.side_effect = [
-        json.dumps({"title": "Alpha", "content": "Alpha content.", "tags": []}),
-        "not valid json",
-        "not valid json",
-        "not valid json",
+        "Alpha content.",
+        LLMBadRequestError("provider rejected the request"),
+        LLMBadRequestError("provider rejected the request"),
+        LLMBadRequestError("provider rejected the request"),
     ]
 
     drafts, failed, _ = compile_concepts(config=config, router=client, db=db)

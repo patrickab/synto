@@ -1,9 +1,9 @@
 """
 All Pydantic models used across the pipeline.
 
-LLM-facing models (AnalysisResult, CompilePlan, ArticlePlan, SingleArticle) use
-small, flat schemas — no nested lists of objects — so a 4B local model can
-reliably produce valid JSON for them.
+LLM-facing models (AnalysisResult, CompilePlan, ArticlePlan) carry only
+label-shaped data — names, enums, numbers, string lists. Prose and LaTeX never
+travel through JSON: see structured_output.request_text.
 """
 
 from __future__ import annotations
@@ -14,10 +14,9 @@ import logging
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, BeforeValidator, Field, field_validator, model_validator
+from pydantic import BaseModel, BeforeValidator, Field
 
 from .paths import to_posix
-from .sanitize import sanitize_tags
 
 
 def _normalize_path_field(v: Any) -> Any:
@@ -76,38 +75,6 @@ class AnalysisResult(BaseModel):
         description="ISO 639-1 language code of the note (e.g. 'en', 'fr', 'de'). Null if uncertain.",  # noqa: E501
     )
 
-    @field_validator("concepts", mode="before")
-    @classmethod
-    def coerce_concepts(cls, v: Any) -> list[Any]:
-        if not isinstance(v, list):
-            return v
-        n_coerced = sum(1 for item in v if isinstance(item, str))
-        if n_coerced:
-            log.debug("coerced %d/%d bare-string concepts to Concept objects", n_coerced, len(v))
-        return [{"name": item, "aliases": []} if isinstance(item, str) else item for item in v]
-
-    @model_validator(mode="before")
-    @classmethod
-    def fill_missing_summary(cls, data: Any) -> Any:
-        if isinstance(data, dict) and data.get("summary") is None:
-            refs = (
-                data.get("named_references")
-                if isinstance(data.get("named_references"), list)
-                else []
-            )
-            concepts = data.get("concepts") if isinstance(data.get("concepts"), list) else []
-            names: list[str] = []
-            for item in [*concepts, *refs]:
-                if isinstance(item, str):
-                    names.append(item)
-                elif isinstance(item, dict) and isinstance(item.get("name"), str):
-                    names.append(item["name"])
-            fallback = "Source contains limited extractable text."
-            if names:
-                fallback = f"Source references: {', '.join(names[:5])}."
-            data = {**data, "summary": fallback}
-        return data
-
 
 class ArticlePlan(BaseModel):
     """Single entry in a CompilePlan — no content, just the roadmap."""
@@ -129,50 +96,10 @@ class CompilePlan(BaseModel):
     )
 
 
-class SingleArticle(BaseModel):
-    """Returned by heavy model: full content for ONE article.
-
-    Kept deliberately small (3 fields) for small-model reliability.
-    Code derives: wikilinks (extract_wikilinks), confidence (source count + quality).
-    """
-
-    title: str
-    content: str = Field(
-        description="Full markdown body with [[wikilinks]] inline (no frontmatter)"
-    )
-    tags: list[str] = Field(
-        description=(
-            "Topic tags, lowercase hyphen-separated, max 6 "
-            "(e.g. machine-learning, quantum-computing)"
-        )
-    )
-
-    @field_validator("tags", mode="before")
-    @classmethod
-    def clean_tags(cls, v: Any) -> list[str]:
-        if v is None:
-            return []
-        if isinstance(v, str):
-            v = [v]
-        if not isinstance(v, list):
-            raise ValueError(f"tags must be a list, got {type(v).__name__}")
-        return sanitize_tags([str(item) for item in v if item is not None])
-
-
 class PageSelection(BaseModel):
     """Returned by fast model: which wiki pages to load for answering a query."""
 
     pages: list[str] = Field(description="Exact page titles from the wiki index (max 5)")
-
-
-class QueryAnswer(BaseModel):
-    """Returned by heavy model: answer to a user query grounded in wiki content."""
-
-    answer: str = Field(description="Markdown answer with [[wikilinks]] referencing concepts")
-    title: str | None = Field(
-        default=None,
-        description="Optional short topic title describing the answer subject",
-    )
 
 
 # ── Lint Models ───────────────────────────────────────────────────────────────

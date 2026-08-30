@@ -59,7 +59,7 @@ def test_query_synthesize_creates_no_new_auto_commit(tmp_path, monkeypatch):
     _run(["git", "commit", "-m", "baseline"], cwd=tmp_path)
 
     selection_json = json.dumps({"pages": ["Topic"]})
-    answer_json = json.dumps({"answer": "Answer.", "title": "Topic Overview"})
+    answer_json = "Answer."
     client = _make_client(selection_json, answer_json)
 
     monkeypatch.setattr("synto.cli._load_deps", lambda cfg: (as_router(client), db))
@@ -77,4 +77,4 @@ def test_query_synthesize_creates_no_new_auto_commit(tmp_path, monkeypatch):
     status = _run(["git", "status", "--porcelain", "--untracked-files=all"], cwd=tmp_path).stdout
     assert "wiki/index.md" in status
     assert "wiki/log.md" in status
-    assert "wiki/synthesis/Topic Overview.md" in status
+    assert "wiki/synthesis/What Is Topic.md" in status

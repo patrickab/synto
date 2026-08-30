@@ -51,10 +51,10 @@ Three-stage local LLM pipeline turning Obsidian raw notes into a synthesized wik
 
 - `cli.py` — Click-based CLI entry point, all commands registered here
 - `config.py` / `global_config.py` — Two-tier config: per-vault `synto.toml` + user-level `~/.config/synto/config.toml`
-- `models.py` — Pydantic v2 schemas for LLM I/O (AnalysisResult, SingleArticle, PageSelection, QueryAnswer) and internal state (RawNoteRecord, WikiArticleRecord)
+- `models.py` — Pydantic v2 schemas for LLM I/O (AnalysisResult, CompilePlan, PageSelection) and internal state (RawNoteRecord, WikiArticleRecord)
 - `state.py` — SQLite state DB tracking note lifecycle (new → ingested → compiled → published/failed), concepts, and articles
 - `ollama_client.py` — Thin httpx wrapper around Ollama HTTP API (no langchain)
-- `structured_output.py` — 3-tier JSON extraction fallback: native `format=json` → regex extraction → retry with error feedback
+- `structured_output.py` — `request_text` for prose/LaTeX (no envelope); `request_structured` for label-shaped data, schema-constrained via `format` + Pydantic validation + retry
 - `vault.py` — Frontmatter parsing (python-frontmatter), wikilink extraction, atomic writes
 - `indexer.py` — Generates `wiki/index.md` and append-only operation log
 - `git_ops.py` — Auto-commit with `[synto]` prefix, safe undo via `git revert`
@@ -70,7 +70,7 @@ Three-stage local LLM pipeline turning Obsidian raw notes into a synthesized wik
 ## Conventions
 
 - **Two LLM tiers:** fast model (gemma4:e4b, 8K ctx) for analysis/routing, heavy model (qwen2.5:14b, 16K ctx) for writing. For manual/smoke testing, use gemma4:e4b for both fast and heavy
-- **Pydantic models for LLM output:** Keep schemas small and flat (no nested lists of objects) for 4B model reliability. JSON schema is injected into system prompts
+- **Prose never travels through JSON:** article bodies and query answers use `request_text`. JSON's escape character is LaTeX's, and `\n` is a *valid* escape, so `\nabla` decodes to a newline plus a stranded `abla` with no error to catch. JSON carries only names, enums, numbers and string lists
 - **Atomic writes:** `vault.atomic_write()` uses temp file + rename for crash safety
 - **Content hashing:** SHA256 on note body (excluding frontmatter) for dedup and manual-edit detection
 - **Concept normalization:** Case-insensitive matching against existing canonical names during ingest

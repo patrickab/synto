@@ -1,22 +1,23 @@
 """
-Structured output extraction from local LLMs.
+Talking to an LLM: plain text, or a small JSON object.
 
-Strategy: three-tier fallback.
-  Tier 1 — Ollama format=json + schema in system prompt (ideal path)
-  Tier 2 — Extract from ```json fenced block in response
-  Tier 3 — Retry with error feedback (max_retries times)
+  request_text       — markdown, prose, LaTeX. No envelope, nothing to unescape.
+  request_structured — label-shaped data only (names, enums, numbers, string
+                       lists), grammar-constrained to the model's JSON Schema
+                       and validated with Pydantic. Retry on failure; never
+                       guess at a malformed response.
 
-Every LLM-facing model uses a small, flat Pydantic schema to maximise
-reliability on small (4B) models. Never ask a small model to produce
-a nested list of complex objects in one shot.
+Prose does not go through request_structured. JSON's escape character is
+LaTeX's command character, and ``\n`` is a *valid* JSON escape — so ``\nabla``
+silently decodes to a newline plus a stranded ``abla``, with no parse error to
+catch and no way to tell it from a real paragraph break afterwards.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import re
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
@@ -108,153 +109,70 @@ def _schema_system(model_class: type[T]) -> str:
     return _SCHEMA_INSTRUCTION.format(template=template)
 
 
-def _extract_json(text: str) -> str | None:
-    """Try to find JSON in raw LLM response text."""
-    # Tier 2a: ```json fenced block
-    m = re.search(r"```json\s*\n(.*?)\n\s*```", text, re.DOTALL)
-    if m:
-        return m.group(1).strip()
-    # Tier 2b: bare ``` block
-    m = re.search(r"```\s*\n(\{.*?\})\s*\n```", text, re.DOTALL)
-    if m:
-        return m.group(1).strip()
-    # Tier 2c: first {...} in response
-    m = re.search(r"\{[\s\S]*\}", text)
-    if m:
-        return m.group(0).strip()
-    return None
-
-
-def _unwrap(data: dict) -> dict:
-    """
-    Unwrap containers that models sometimes produce instead of flat objects.
-
-    Handles three patterns:
-    1.  Single-key dict wrapper:    {"AnalysisResult": {...}} → {...}
-    1b. Single-key string wrapper:  {"result": "{...json...}"} → parsed inner dict
-    2.  JSON-Schema echo:           {"description": "...", "properties": {"title": ..., ...}}
-                                    → extract leaf values from "properties"
-    """
-    if not isinstance(data, dict):
-        return data
-
-    # Pattern 1 / 1b: single-key wrapper
-    if len(data) == 1:
-        key = next(iter(data))
-        value = data[key]
-        if isinstance(value, dict):
-            return value
-        # 1b: value is a JSON-encoded string — model put the whole object in one field
-        if isinstance(value, str):
-            try:
-                parsed = json.loads(value)
-                if isinstance(parsed, dict):
-                    return parsed
-            except (json.JSONDecodeError, ValueError):
-                pass
-
-    # Pattern 2: model echoes JSON Schema format with "properties" dict
-    # {"description": "...", "properties": {"field": "value", ...}}
-    if "properties" in data and isinstance(data["properties"], dict):
-        props = data["properties"]
-        # Only use if values look like actual data (not nested schema dicts)
-        if all(not isinstance(v, dict) or "type" not in v for v in props.values()):
-            return props
-
-    return data
-
-
-_CTRL_TO_ESCAPE = {"\t": "t", "\x08": "b", "\x0c": "f"}
-_CTRL_ESCAPE_RE = re.compile(r"([\t\x08\x0c])([a-zA-Z])")
-_JSON_SIMPLE_ESCAPES = {'"', "\\", "/", "b", "f", "n", "r", "t"}
-
-
-def _repair_invalid_json_escapes(raw: str) -> str:
-    """Make invalid JSON backslash runs parseable without disturbing valid escapes.
-
-    LLMs often emit LaTeX commands such as ``\\in`` or ``\\approx`` inside JSON
-    strings. A single backslash before those commands is invalid JSON. More subtly,
-    models sometimes emit odd-length runs like ``\\\\\\in`` where the final
-    backslash still starts an invalid escape. This helper preserves valid JSON
-    escapes and only appends one backslash when a run would otherwise terminate in
-    an invalid escape.
-    """
-    out: list[str] = []
-    i = 0
-    n = len(raw)
-    while i < n:
-        if raw[i] != "\\":
-            out.append(raw[i])
-            i += 1
-            continue
-
-        start = i
-        while i < n and raw[i] == "\\":
-            i += 1
-        run = raw[start:i]
-        next_char = raw[i] if i < n else ""
-
-        valid_escape = next_char in _JSON_SIMPLE_ESCAPES
-        if next_char == "u":
-            valid_escape = i + 4 < n and all(
-                c in "0123456789abcdefABCDEF" for c in raw[i + 1 : i + 5]
-            )
-
-        if not valid_escape and len(run) % 2 == 1:
-            run += "\\"
-        out.append(run)
-
-    return "".join(out)
-
-
-def _fix_json_ctrl_escapes(obj: Any) -> Any:
-    """Undo json.loads() silently converting LaTeX command starts to control chars.
-
-    LLMs routinely emit \\text{}, \\beta, \\frac etc. in JSON strings without
-    double-escaping. json.loads() converts \\t→tab, \\b→backspace, \\f→form-feed
-    with no error. A control char followed by a letter in our content is almost always
-    a corrupted LaTeX command, not a real control character.
-
-    \\n is intentionally excluded — real newlines (paragraph breaks) also come from
-    \\n in JSON and must be preserved.
-    """
-    if isinstance(obj, str):
-        return _CTRL_ESCAPE_RE.sub(lambda m: "\\" + _CTRL_TO_ESCAPE[m.group(1)] + m.group(2), obj)
-    if isinstance(obj, dict):
-        return {k: _fix_json_ctrl_escapes(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_fix_json_ctrl_escapes(item) for item in obj]
-    return obj
-
-
 def _try_parse(raw: str, model_class: type[T]) -> tuple[T | None, str]:
-    """Try direct JSON parse + Pydantic validation. Returns (result, error_str)."""
+    """Parse JSON + validate against the model. Returns (result, error_str).
+
+    No escape repair, no container unwrapping: this path only ever carries
+    label-shaped data, so a failure here is a real failure and belongs in the
+    retry loop rather than being guessed at.
+    """
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as e:
-        if "Invalid \\escape" in str(e) or "Invalid \\uXXXX escape" in str(e):
-            try:
-                repaired = _repair_invalid_json_escapes(raw)
-                data = json.loads(repaired)
-            except json.JSONDecodeError:
-                return None, f"Invalid JSON: {e}"
-        else:
-            return None, f"Invalid JSON: {e}"
-    data = _fix_json_ctrl_escapes(data)
-    # Try direct validation first
-    last_err = ""
+        return None, f"Invalid JSON: {e}"
     try:
         return model_class.model_validate(data), ""
     except ValidationError as e:
-        last_err = str(e)
-    # Try unwrapping single-key container ({"ClassName": {...}})
-    try:
-        return model_class.model_validate(_unwrap(data)), ""
-    except ValidationError as e:
-        last_err = str(e)
-    except Exception:
-        pass
-    return None, last_err
+        return None, str(e)
+
+
+def request_text(
+    client: LLMClientProtocol,
+    prompt: str,
+    model: str,
+    system: str = "",
+    num_ctx: int = 8192,
+    num_predict: int = -1,
+    temperature: float | None = None,
+    stage: str = "",
+    model_role: str | None = None,
+    think: bool | None = None,
+    options: dict | None = None,
+) -> str:
+    """Request plain-text output — no JSON envelope, no parsing.
+
+    Prose and LaTeX must never travel inside a JSON string: ``\\n`` is a valid JSON
+    escape, so ``\\nabla`` decodes to a newline plus a stranded ``abla`` with no
+    error to catch. Use this for any field that carries markdown or math; keep
+    ``request_structured`` for label-shaped data (names, enums, numbers).
+    """
+    raw = client.generate(
+        prompt=prompt,
+        model=model,
+        system=system,
+        format=None,
+        num_ctx=num_ctx,
+        num_predict=num_predict,
+        temperature=temperature,
+        think=think,
+        options=options,
+    )
+    stats = getattr(client, "_last_stats", {}) or {}
+    emit(
+        LLMCallEvent(
+            stage=stage,
+            model=model,
+            tier=1,
+            retries=0,
+            latency_ms=int(stats.get("latency_ms") or 0),
+            prompt_tokens=stats.get("prompt_tokens"),
+            completion_tokens=stats.get("completion_tokens"),
+            num_ctx=num_ctx,
+            error=None,
+            model_role=model_role,
+        )
+    )
+    return raw.strip()
 
 
 def request_structured(
@@ -319,12 +237,15 @@ def request_structured(
     for attempt in range(max_retries + 1):
         log.debug("structured_output attempt %d/%d model=%s", attempt + 1, max_retries + 1, model)
 
-        # Tier 1: JSON mode
+        # Ollama >=0.5 grammar-constrains decoding to the schema, so output cannot
+        # be malformed or the wrong shape. Providers that only understand "json"
+        # (OpenAI-compat json_object mode) fall back to syntax-only constraint and
+        # lean on Pydantic validation + retry below.
         raw = client.generate(
             prompt=current_prompt,
             model=model,
             system=full_system,
-            format="json",
+            format=model_class.model_json_schema(),
             num_ctx=num_ctx,
             num_predict=num_predict,
             temperature=temperature,
@@ -342,25 +263,11 @@ def request_structured(
             total_completion_tokens += int(ct)
             completion_tokens_seen = True
 
-        # Try direct parse (Tier 1)
         result, parse_err = _try_parse(raw, model_class)
         if result is not None:
-            tier = 3 if attempt > 0 else 1
-            _emit(tier=tier, retries=attempt, error=None)
+            _emit(tier=3 if attempt > 0 else 1, retries=attempt, error=None)
             return result
         last_error = parse_err
-        log.debug("Tier 1 parse failed, trying extraction")
-
-        # Tier 2: extract from text
-        extracted = _extract_json(raw)
-        if extracted:
-            result, parse_err = _try_parse(extracted, model_class)
-            if result is not None:
-                tier = 3 if attempt > 0 else 2
-                _emit(tier=tier, retries=attempt, error=None)
-                return result
-            if parse_err:
-                last_error = parse_err
 
         log.debug(
             "structured_output attempt %d failed: %s. Raw (first 300): %s",

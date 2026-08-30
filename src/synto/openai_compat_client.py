@@ -16,7 +16,7 @@ Auth:
   - Azure:              api-key: {api_key}  +  ?api-version= query param
   - Local no-auth:      no header
 
-JSON mode: if supports_json_mode=True, format="json" injects
+JSON mode: if supports_json_mode=True, a truthy `format` injects
   response_format: {"type": "json_object"}.
   If the provider returns HTTP 400, the request is retried once without it
   (transparent auto-downgrade for models that reject the field).
@@ -580,7 +580,7 @@ class OpenAICompatClient:
         prompt: str,
         model: str,
         system: str = "",
-        format: str | None = None,
+        format: str | dict | None = None,
         num_ctx: int = 8192,
         num_predict: int = -1,
         temperature: float | None = None,
@@ -596,7 +596,8 @@ class OpenAICompatClient:
         max_tokens → max_completion_tokens, non-default temperature → dropped), the
         request auto-retries with the fixup and the model's quirk is remembered for
         the client's lifetime.
-        format="json" injects response_format when supports_json_mode=True.
+        A truthy `format` injects response_format when supports_json_mode=True; the
+        schema dict Ollama grammar-constrains on degrades to syntax-only json_object.
         `think` is a no-op here (Ollama-specific flag); reasoning control for OpenAI-style
         providers is provider-specific — set it via `options` instead.
         """
@@ -615,7 +616,9 @@ class OpenAICompatClient:
         if temperature is not None:
             payload["temperature"] = temperature
 
-        use_json_mode = format == "json" and self.supports_json_mode
+        # Callers pass a JSON Schema dict (Ollama grammar-constrains on it); this API
+        # only understands syntax-level json_object, so any truthy format maps to it.
+        use_json_mode = bool(format) and self.supports_json_mode
         if use_json_mode:
             payload["response_format"] = {"type": "json_object"}
 

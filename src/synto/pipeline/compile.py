@@ -7,7 +7,7 @@ Two compile modes:
     Manual-edit protection via content_hash comparison.
 
   compile_notes (legacy, --legacy flag): two-step LLM planning (CompilePlan →
-    SingleArticle). Kept as fallback.
+    article body). Kept as fallback.
 
 Articles are written to wiki/.drafts/ for human review before publishing.
 """
@@ -30,12 +30,12 @@ import frontmatter as fm_lib
 
 from ..config import Config
 from ..markdown_math import mask_markdown_regions, restore_markdown_regions, sanitize_obsidian_math
-from ..models import ArticlePlan, CompilePlan, PipelineVersion, SingleArticle, WikiArticleRecord
+from ..models import ArticlePlan, CompilePlan, PipelineVersion, WikiArticleRecord
 from ..openai_compat_client import LLMBadRequestError, LLMTruncatedError
 from ..paths import rel_posix, to_posix
 from ..sanitize import sanitize_tags
 from ..state import StateDB
-from ..structured_output import StructuredOutputError, request_structured
+from ..structured_output import StructuredOutputError, request_structured, request_text
 from ..vault import (
     _mask_code_blocks,
     _restore_code_blocks,
@@ -141,8 +141,7 @@ _QUALITY_BONUS = {"high": 0.25, "medium": 0.1, "low": 0.0}
 # Stubs are short by design (≤150 words). Hardcoded cap is intentional.
 _MAX_STUB_PREDICT = 512
 
-# Math floor: structured generation needs enough headroom for title + content + tags.
-# Below this, JSON schema can't reliably complete.
+# Math floor: below this an article body can't reliably complete.
 _MIN_ARTICLE_PREDICT = 512
 
 _STRUCTURED_ERROR_VERSION = 1
@@ -515,15 +514,6 @@ def _repair_wikilink_placeholders(content: str) -> str:
     return _restore_code_blocks(repaired, replacements)
 
 
-def _repair_literal_newlines(content: str) -> str:
-    """Repair LLM output that escaped Markdown newlines into literal \n text."""
-    if "\\n" not in content:
-        return content
-    if content.count("\\n") < 2:
-        return content
-    return content.replace("\\n", "\n")
-
-
 _MEDIA_EXT_RE = r"(?:pdf|png|jpe?g|gif|svg|webp)"
 _PLACEHOLDER_EMBED_RE = re.compile(r"!\[\[[^\]]*\bunknown_filename\b[^\]]*\]\]", re.I)
 _MALFORMED_MEDIA_EMBED_RE = re.compile(rf"(?<!\S)!([^\s\[]+\.{_MEDIA_EXT_RE})", re.I)
@@ -693,8 +683,27 @@ def _inject_body_sections(
     return body + sections
 
 
+def _derive_tags(
+    article_title: str,
+    source_paths: list[str],
+    db: StateDB,
+    existing_meta: dict | None = None,
+) -> list[str]:
+    """Tags come from the concepts already extracted for these sources, not the model.
+
+    Asking the writer for tags is what put the article body in a JSON field in the
+    first place; the state DB already knows which concepts each source feeds. Tags
+    already on the published article come first so hand-curated ones survive the cap.
+    """
+    existing = existing_meta.get("tags") if existing_meta else None
+    kept = [str(t) for t in existing if t is not None] if isinstance(existing, list) else []
+    own = article_title.casefold()
+    names = [n for n in db.get_concepts_for_sources(source_paths) if n.casefold() != own]
+    return sanitize_tags([*kept, article_title, *sorted(names)])[:6]
+
+
 def _write_draft(
-    content_result: SingleArticle,
+    content: str,
     config: Config,
     source_paths: list[str],
     db: StateDB,
@@ -708,10 +717,10 @@ def _write_draft(
     run_ulid: str | None = None,
     pipeline: PipelineVersion | None = None,
 ) -> Path:
-    """Write SingleArticle to wiki/.drafts/ and record in state DB."""
+    """Write an article body to wiki/.drafts/ and record it in the state DB."""
     config.drafts_dir.mkdir(parents=True, exist_ok=True)
 
-    article_title = canonical_title or content_result.title
+    article_title = canonical_title or "untitled"
     safe_name = sanitize_filename(article_title)
     draft_path = config.drafts_dir / f"{safe_name}.md"
 
@@ -719,8 +728,7 @@ def _write_draft(
     # for titles that already resolve on disk so published output never ships speculative links.
     source_refs = _build_source_refs(source_paths, config.vault)
     known_titles = (resolvable_titles or []) + [ref.title for ref in source_refs]
-    body = _repair_literal_newlines(content_result.content)
-    body = sanitize_obsidian_math(body)
+    body = sanitize_obsidian_math(content)
     body = _repair_malformed_embeds(body)
     body = _repair_bare_bracket_links(body, known_titles)
     body = ensure_wikilinks(body, resolvable_titles or [])
@@ -815,7 +823,7 @@ def _write_draft(
 
     meta = build_wiki_frontmatter(
         title=article_title,
-        tags=content_result.tags,
+        tags=_derive_tags(article_title, source_paths, db, existing_meta),
         sources=source_paths,
         confidence=confidence,
         is_draft=True,
@@ -872,10 +880,9 @@ def _write_concept_prompt(
         prompt += f"\nVAULT CONVENTIONS:\n{vault_schema}\n"
     prompt += (
         f"\n{lang_instruction}"
-        f"IMPORTANT: Keep the content field under 800 words. Be concise.\n"
-        f"Tags must be lowercase, hyphen-separated, no spaces or special characters. "
-        f"Good: machine-learning, quantum-computing. Bad: Machine Learning, C++.\n"
-        f"Do NOT use inline hashtags (#tag) in the content body — use [[wikilinks]] only.\n"
+        f"IMPORTANT: Keep the article under 800 words. Be concise.\n"
+        f"Reply with the markdown body only — no frontmatter, no title heading, no JSON.\n"
+        f"Do NOT use inline hashtags (#tag) — use [[wikilinks]] only.\n"
         f"Use Obsidian math syntax: inline $...$ and display $$...$$. Do not use \\[...\\].\n"
         f"If source material references images or diagrams, mention their filenames "
         f"so they can be embedded later (e.g. ![[diagram.png]]).\n"
@@ -1016,10 +1023,12 @@ def compile_concepts(
     existing_titles = [t for t, _ in list_wiki_articles(config.wiki_dir)]
     draft_titles = [t for t, _, _ in list_draft_articles(config.drafts_dir)]
     resolvable_titles = existing_titles + [t for t in draft_titles if t not in existing_titles]
-    prompt_titles = list(resolvable_titles)
+    # Include this run's own concepts so articles can link to batch siblings that don't
+    # exist on disk yet — otherwise the first compile of a fresh vault strips every
+    # cross-link and articles end up citing only their source document.
     for concept_name in concept_names:
-        if concept_name not in prompt_titles:
-            prompt_titles.append(concept_name)
+        if concept_name not in resolvable_titles:
+            resolvable_titles.append(concept_name)
     vault_schema = _load_vault_schema(config)
     total = len(concept_names)
     # Build alias resolution map once per compile run
@@ -1107,10 +1116,9 @@ def compile_concepts(
                 f"Keep it under 150 words. Include a note that this is a stub needing sources."
             )
             try:
-                result: SingleArticle = request_structured(
+                result = request_text(
                     client=fast.client,
                     prompt=stub_prompt,
-                    model_class=SingleArticle,
                     model=fast.model,
                     system=_STUB_WRITE_SYSTEM,
                     num_ctx=fast.ctx,
@@ -1133,7 +1141,7 @@ def compile_concepts(
                 )
                 continue
             draft_path = _write_draft(
-                content_result=result,
+                content=result,
                 config=config,
                 source_paths=[],
                 db=db,
@@ -1177,7 +1185,7 @@ def compile_concepts(
             name,
             source_paths,
             config,
-            prompt_titles,
+            resolvable_titles,
             existing_content,
             vault_schema,
             rejection_history,
@@ -1228,10 +1236,9 @@ def compile_concepts(
             continue
 
         try:
-            result = request_structured(
+            result = request_text(
                 client=heavy.client,
                 prompt=write_prompt,
-                model_class=SingleArticle,
                 model=heavy.model,
                 system=(
                     _WRITE_SYSTEM_WITH_CITATIONS
@@ -1286,7 +1293,7 @@ def compile_concepts(
                     fallback_prompt = _write_concept_prompt(
                         name,
                         fallback_sources_text,
-                        prompt_titles,
+                        resolvable_titles,
                         existing_content[:existing_budget] if existing_budget else "",
                         vault_schema,
                         rejection_history,
@@ -1308,10 +1315,9 @@ def compile_concepts(
                         e = retry_error
                         continue
                     try:
-                        result = request_structured(
+                        result = request_text(
                             client=heavy.client,
                             prompt=fallback_prompt,
-                            model_class=SingleArticle,
                             model=heavy.model,
                             system=(
                                 _WRITE_SYSTEM_WITH_CITATIONS
@@ -1362,7 +1368,7 @@ def compile_concepts(
                 continue
 
         draft_path = _write_draft(
-            content_result=result,
+            content=result,
             config=config,
             source_paths=resolved_paths,
             db=db,
@@ -1397,7 +1403,7 @@ def compile_concepts(
     return draft_paths, failed, concept_timings
 
 
-# ── Legacy compile (CompilePlan → SingleArticle) ──────────────────────────────
+# ── Legacy compile (CompilePlan → article body) ───────────────────────────────
 
 
 def _plan_prompt(
@@ -1429,10 +1435,9 @@ def _write_prompt_legacy(
         f"Action: {article.action}\n"
         f"Reasoning: {article.reasoning}\n"
         f"{lang_instruction}"
-        f"IMPORTANT: Keep the content field under 800 words. Be concise.\n"
-        f"Tags must be lowercase, hyphen-separated, no spaces or special characters. "
-        f"Good: machine-learning, quantum-computing. Bad: Machine Learning, C++.\n"
-        f"Do NOT use inline hashtags (#tag) in the content body — use [[wikilinks]] only.\n"
+        f"IMPORTANT: Keep the article under 800 words. Be concise.\n"
+        f"Reply with the markdown body only — no frontmatter, no title heading, no JSON.\n"
+        f"Do NOT use inline hashtags (#tag) — use [[wikilinks]] only.\n"
         f"Use Obsidian math syntax: inline $...$ and display $$...$$. Do not use \\[...\\].\n\n"
         f"Existing wiki articles to link to: {titles_str}\n\n"
         f"SOURCE MATERIAL:\n{sources}"
@@ -1563,10 +1568,9 @@ def compile_notes(
             continue
 
         try:
-            result: SingleArticle = request_structured(
+            result = request_text(
                 client=heavy.client,
                 prompt=write_prompt,
-                model_class=SingleArticle,
                 model=heavy.model,
                 system=_WRITE_SYSTEM,
                 num_ctx=heavy.ctx,
@@ -1594,13 +1598,14 @@ def compile_notes(
 
         confidence = _compute_confidence(resolved_paths, db)
         draft_path = _write_draft(
-            content_result=result,
+            content=result,
             config=config,
             source_paths=resolved_paths,
             db=db,
             confidence=confidence,
             existing_meta=existing_meta,
             resolvable_titles=existing_titles,
+            canonical_title=article.title,
             run_ulid=run_ulid,
             pipeline=pipeline,
         )

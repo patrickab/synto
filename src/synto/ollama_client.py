@@ -89,7 +89,7 @@ class OllamaClient:
         prompt: str,
         model: str,
         system: str = "",
-        format: str | None = None,
+        format: str | dict | None = None,
         num_ctx: int = 8192,
         num_predict: int = -1,
         temperature: float | None = None,

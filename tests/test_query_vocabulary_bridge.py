@@ -70,7 +70,7 @@ def _fast_client(pages: list[str]):
 
 def _heavy_client(answer: str = "Answer.", title: str = "Topic"):
     c = MagicMock()
-    c.generate.return_value = json.dumps({"answer": answer, "title": title})
+    c.generate.return_value = answer
     return as_endpoint(c)
 
 

@@ -95,7 +95,7 @@ def test_run_query_returns_result_object_with_no_save_metadata(tmp_path):
     _write_concept_page(config, "Topic")
 
     selection_json = json.dumps({"pages": ["Topic"]})
-    answer_json = json.dumps({"answer": "Answer.", "title": "Topic"})
+    answer_json = "Answer."
     client = _make_client(selection_json, answer_json)
 
     result = run_query(config, client, db, "What is Topic?")
@@ -112,7 +112,7 @@ def test_run_query_save_returns_query_save_metadata(tmp_path):
     _write_concept_page(config, "Topic")
 
     selection_json = json.dumps({"pages": ["Topic"]})
-    answer_json = json.dumps({"answer": "Answer.", "title": "Topic"})
+    answer_json = "Answer."
     client = _make_client(selection_json, answer_json)
 
     result = run_query(config, client, db, "What is Topic?", save=True)
@@ -123,20 +123,26 @@ def test_run_query_save_returns_query_save_metadata(tmp_path):
     assert result.synthesis is None
 
 
-def test_query_answer_prompt_requests_title(tmp_path):
+def test_query_answer_prompt_asks_for_markdown_not_json(tmp_path):
+    """The answer prompt used to ask for Obsidian math *and* a JSON envelope.
+
+    Those instructions contradict each other: JSON's escape character is LaTeX's
+    command character. The answer is plain markdown now, and the title is derived
+    from the question.
+    """
     _, config, db = _make_vault(tmp_path)
     _write_index(config, "# Wiki Index\n\n## Concepts\n- [[Topic]]\n")
     _write_concept_page(config, "Topic")
 
-    selection_json = json.dumps({"pages": ["Topic"]})
-    answer_json = json.dumps({"answer": "Answer.", "title": "Topic"})
-    client = _make_client(selection_json, answer_json)
+    client = _make_client(json.dumps({"pages": ["Topic"]}), "Answer.")
 
     run_query(config, client, db, "What is Topic?")
 
-    second_call_prompt = client.generate.call_args_list[1].kwargs.get("prompt", "")
-    assert "short topic title" in second_call_prompt
-    assert '"title": "short title"' in second_call_prompt
+    answer_call = client.generate.call_args_list[1].kwargs
+    assert "markdown answer only" in answer_call["prompt"]
+    assert "Return JSON" not in answer_call["prompt"]
+    assert "short topic title" not in answer_call["prompt"]
+    assert answer_call["format"] is None
 
 
 def test_run_query_synthesize_creates_synthesis_file_and_db_row(tmp_path):
@@ -145,7 +151,7 @@ def test_run_query_synthesize_creates_synthesis_file_and_db_row(tmp_path):
     _write_concept_page(config, "Topic")
 
     selection_json = json.dumps({"pages": ["Topic"]})
-    answer_json = json.dumps({"answer": "Answer.", "title": "Topic Overview"})
+    answer_json = "Answer."
     client = _make_client(selection_json, answer_json)
 
     with app_event_sink():
@@ -154,7 +160,7 @@ def test_run_query_synthesize_creates_synthesis_file_and_db_row(tmp_path):
     assert result.synthesis is not None
     assert result.synthesis.path.parent == config.synthesis_dir
     meta, body = parse_note(result.synthesis.path)
-    assert meta["title"] == "Topic Overview"
+    assert meta["title"] == "What Is Topic"
     assert meta["tags"] == ["synthesis"]
     assert meta["kind"] == "synthesis"
     assert meta["source_question"] == "What is Topic?"
@@ -175,7 +181,7 @@ def test_run_query_synthesize_sanitizes_obsidian_math_and_hash(tmp_path):
     _write_concept_page(config, "Topic")
 
     selection_json = json.dumps({"pages": ["Topic"]})
-    answer_json = json.dumps({"answer": "\\\\[\na=b\n\\\\]", "title": "Topic Overview"})
+    answer_json = "\\\\[\na=b\n\\\\]"
     client = _make_client(selection_json, answer_json)
 
     with app_event_sink() as events:
@@ -212,7 +218,7 @@ def test_run_query_synthesize_keeps_existing_duplicate(tmp_path):
     _write_concept_page(config, "Topic")
 
     selection_json = json.dumps({"pages": ["Topic"]})
-    answer_json = json.dumps({"answer": "Answer.", "title": "Topic Overview"})
+    answer_json = "Answer."
     client = _make_client(selection_json, answer_json)
 
     first = run_query(config, client, db, "What is Topic?", synthesize=True)
@@ -238,7 +244,7 @@ def test_run_query_synthesize_duplicate_can_save_with_suffix(tmp_path):
     _write_concept_page(config, "Topic")
 
     selection_json = json.dumps({"pages": ["Topic"]})
-    answer_json = json.dumps({"answer": "Answer.", "title": "Topic Overview"})
+    answer_json = "Answer."
     first = run_query(
         config, _make_client(selection_json, answer_json), db, "What is Topic?", synthesize=True
     )
@@ -268,8 +274,8 @@ def test_run_query_synthesize_duplicate_can_update_in_place(tmp_path):
     _write_concept_page(config, "Topic")
 
     selection_json = json.dumps({"pages": ["Topic"]})
-    first_answer = json.dumps({"answer": "Original answer.", "title": "Topic Overview"})
-    updated_answer = json.dumps({"answer": "Updated answer.", "title": "Topic Overview"})
+    first_answer = "Original answer."
+    updated_answer = "Updated answer."
     first = run_query(
         config, _make_client(selection_json, first_answer), db, "What is Topic?", synthesize=True
     )
@@ -292,9 +298,9 @@ def test_run_query_synthesize_duplicate_can_update_in_place(tmp_path):
     meta, _ = parse_note(second.synthesis.path)
     article = db.get_article(str(second.synthesis.path.relative_to(config.vault)))
     assert "Updated answer." in body
-    assert meta["title"] == "Topic Overview"
+    assert meta["title"] == "What Is Topic"
     assert article is not None
-    assert article.title == "Topic Overview"
+    assert article.title == "What Is Topic"
     assert len(list(config.synthesis_dir.glob("*.md"))) == 1
     assert events[0].payload["resolution"] == "updated_in_place"
 
@@ -305,7 +311,7 @@ def test_run_query_synthesize_update_in_place_rejects_manual_edit_drift(tmp_path
     _write_concept_page(config, "Topic")
 
     selection_json = json.dumps({"pages": ["Topic"]})
-    answer_json = json.dumps({"answer": "Original answer.", "title": "Topic Overview"})
+    answer_json = "Original answer."
     first = run_query(
         config, _make_client(selection_json, answer_json), db, "What is Topic?", synthesize=True
     )
@@ -321,7 +327,7 @@ def test_run_query_synthesize_update_in_place_rejects_manual_edit_drift(tmp_path
                 config,
                 _make_client(
                     selection_json,
-                    json.dumps({"answer": "Updated answer.", "title": "Retitled Topic"}),
+                    "Updated answer.",
                 ),
                 db,
                 "What is Topic?",
@@ -331,10 +337,10 @@ def test_run_query_synthesize_update_in_place_rejects_manual_edit_drift(tmp_path
 
     refreshed_meta, refreshed_body = parse_note(path)
     article = db.get_article(str(path.relative_to(config.vault)))
-    assert refreshed_meta["title"] == "Topic Overview"
+    assert refreshed_meta["title"] == "What Is Topic"
     assert refreshed_body == "Edited by hand."
     assert article is not None
-    assert article.title == "Topic Overview"
+    assert article.title == "What Is Topic"
     assert len(events) == 1
     assert events[0].payload["resolution"] == "manual_edit_conflict"
     assert events[0].payload["duplicate_detected"] is True
@@ -347,7 +353,7 @@ def test_run_query_synthesize_race_duplicate_can_save_with_suffix(tmp_path, monk
     _write_concept_page(config, "Topic")
 
     selection_json = json.dumps({"pages": ["Topic"]})
-    answer_json = json.dumps({"answer": "Answer.", "title": "Topic Overview"})
+    answer_json = "Answer."
 
     original_insert = db.insert_synthesis_atomic
     first_call = {"value": True}
@@ -389,7 +395,7 @@ def test_run_query_synthesize_race_duplicate_can_save_with_suffix(tmp_path, monk
     assert result.synthesis is not None
     assert result.synthesis.resolution == "saved_with_suffix"
     assert result.synthesis.duplicate_detected is True
-    assert result.synthesis.path.name == "Topic Overview.md"
+    assert result.synthesis.path.name == "What Is Topic.md"
     assert events[0].payload["resolution"] == "saved_with_suffix"
 
 
@@ -400,11 +406,11 @@ def test_run_query_synthesize_stale_db_row_missing_file_uses_suffix_without_loop
     _write_index(config, "# Wiki Index\n\n## Concepts\n- [[Topic]]\n")
     _write_concept_page(config, "Topic")
 
-    stale_path = config.synthesis_dir / "Topic Overview.md"
+    stale_path = config.synthesis_dir / "What Is Topic.md"
     db.upsert_article(
         WikiArticleRecord(
             path=str(stale_path.relative_to(config.vault)),
-            title="Topic Overview",
+            title="What Is Topic",
             sources=[],
             content_hash="missing-file-hash",
             status="published",
@@ -414,7 +420,7 @@ def test_run_query_synthesize_stale_db_row_missing_file_uses_suffix_without_loop
     )
 
     selection_json = json.dumps({"pages": ["Topic"]})
-    answer_json = json.dumps({"answer": "Fresh answer.", "title": "Topic Overview"})
+    answer_json = "Fresh answer."
 
     original_insert = db.insert_synthesis_atomic
     attempts: list[str] = []
@@ -431,14 +437,16 @@ def test_run_query_synthesize_stale_db_row_missing_file_uses_suffix_without_loop
         config,
         _make_client(selection_json, answer_json),
         db,
-        "A different question altogether",
+        # Same question shape as the stale row's title so the path still collides:
+        # the title is derived from the question now, not returned by the model.
+        "What is Topic?",
         synthesize=True,
     )
 
     assert result.synthesis is not None
-    assert result.synthesis.path == config.synthesis_dir / "Topic Overview-2.md"
+    assert result.synthesis.path == config.synthesis_dir / "What Is Topic-2.md"
     assert result.synthesis.resolution == "saved_with_suffix"
-    assert attempts == ["wiki/synthesis/Topic Overview-2.md"]
+    assert attempts == ["wiki/synthesis/What Is Topic-2.md"]
 
 
 def test_run_query_synthesize_orphan_file_uses_suffix_resolution(tmp_path):
@@ -447,9 +455,9 @@ def test_run_query_synthesize_orphan_file_uses_suffix_resolution(tmp_path):
     _write_concept_page(config, "Topic")
 
     write_note(
-        config.synthesis_dir / "Topic Overview.md",
+        config.synthesis_dir / "What Is Topic.md",
         {
-            "title": "Topic Overview",
+            "title": "What Is Topic",
             "tags": ["synthesis"],
             "kind": "synthesis",
             "status": "published",
@@ -458,18 +466,18 @@ def test_run_query_synthesize_orphan_file_uses_suffix_resolution(tmp_path):
     )
 
     selection_json = json.dumps({"pages": ["Topic"]})
-    answer_json = json.dumps({"answer": "Fresh answer.", "title": "Topic Overview"})
+    answer_json = "Fresh answer."
 
     result = run_query(
         config,
         _make_client(selection_json, answer_json),
         db,
-        "What is topic freshness?",
+        "What is Topic?",
         synthesize=True,
     )
 
     assert result.synthesis is not None
-    assert result.synthesis.path == config.synthesis_dir / "Topic Overview-2.md"
+    assert result.synthesis.path == config.synthesis_dir / "What Is Topic-2.md"
     assert result.synthesis.resolution == "saved_with_suffix"
 
 
@@ -479,7 +487,7 @@ def test_run_query_synthesize_race_duplicate_can_update_in_place(tmp_path, monke
     _write_concept_page(config, "Topic")
 
     selection_json = json.dumps({"pages": ["Topic"]})
-    answer_json = json.dumps({"answer": "Updated answer.", "title": "Topic Overview"})
+    answer_json = "Updated answer."
 
     original_insert = db.insert_synthesis_atomic
     first_call = {"value": True}
@@ -540,10 +548,10 @@ def test_run_query_synthesize_race_duplicate_can_update_in_place(tmp_path, monke
     assert result.synthesis.path == raced_path
     meta, body = parse_note(raced_path)
     article = db.get_article(str(raced_path.relative_to(config.vault)))
-    assert meta["title"] == "Topic Overview"
+    assert meta["title"] == "What Is Topic"
     assert "Updated answer." in body
     assert article is not None
-    assert article.title == "Topic Overview"
+    assert article.title == "What Is Topic"
     assert events[0].payload["resolution"] == "updated_in_place"
 
 
@@ -574,7 +582,7 @@ def test_run_query_synthesize_rejects_synthesis_source_chain(tmp_path):
     )
 
     selection_json = json.dumps({"pages": ["Old Synthesis"]})
-    answer_json = json.dumps({"answer": "Answer.", "title": "Topic Overview"})
+    answer_json = "Answer."
     client = _make_client(selection_json, answer_json)
 
     with app_event_sink() as events:
@@ -600,7 +608,7 @@ def test_synthesize_write_failure_leaves_no_phantom_row(tmp_path, monkeypatch):
     _write_concept_page(config, "Topic")
 
     selection_json = json.dumps({"pages": ["Topic"]})
-    answer_json = json.dumps({"answer": "Answer.", "title": "Topic Overview"})
+    answer_json = "Answer."
     client = _make_client(selection_json, answer_json)
 
     def boom(path, text):

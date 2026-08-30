@@ -18,7 +18,7 @@ class LLMClientProtocol(Protocol):
         prompt: str,
         model: str,
         system: str = ...,
-        format: str | None = ...,
+        format: str | dict | None = ...,
         num_ctx: int = ...,
         num_predict: int = ...,
         temperature: float | None = ...,
